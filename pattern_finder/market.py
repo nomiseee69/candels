@@ -1,6 +1,5 @@
 import requests
-from datetime import datetime
-
+import pandas as pd
 def get_candles(symbol, interval, limit):
     url = "https://api.binance.com/api/v3/klines"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
@@ -10,19 +9,22 @@ def get_candles(symbol, interval, limit):
     else:
         print(f'Error:{response.status_code}')
         return None
-if __name__ == '__main__':
-    pairs = ["BTCUSDT", "ETHUSDT"]
-    for pair in pairs:
-        print(f"Пара монет {pair}")
-        candles = get_candles(pair, "4h", 10)
-        if  not candles:
-            continue
-        for candle in candles:
-            open_time = datetime.fromtimestamp(candle[0]/1000)
-            open_price = float(candle[1])
-            close_price = float(candle[4])
-            if open_price > close_price:
-                color= "🔴"
-            else:
-                color ="🟢"
-            print(f'{open_time.strftime("%Y-%m-%d %H:%M")} | O: {open_price} C: {close_price} {color}')
+    
+def candles_to_df(candles):
+    df = pd.DataFrame(candles)
+    df = df[[0, 1, 2, 3, 4, 5]]
+    df.columns = ["open_time", "open", "high", "low", "close", "volume"]
+
+    price_cols = ["open", "high", "low", "close", "volume"]
+    df[price_cols] = df[price_cols].astype(float)
+
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+    df["is_green"] = df['close'] > df['open']
+
+    return df
+
+if __name__ == "__main__":
+    candles = get_candles("BTCUSDT", "4h", 10)
+    df = candles_to_df(candles)
+    print(df)
+    print(df[df["is_green"]])
