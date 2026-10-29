@@ -10,13 +10,15 @@ def prepare_screenshot(path, target_width=800):
 
     return img
 
-small_img = prepare_screenshot('t.jpg')
-small_img400 = prepare_screenshot('t.jpg', target_width=400)
 
-small_img.save('resulte.png')
+if __name__ == '__main__':
+    small_img = prepare_screenshot('t.jpg')
+    small_img400 = prepare_screenshot('t.jpg', target_width=400)
 
-print(small_img.size)
-print(small_img400.size)
+    small_img.save('resulte.png')
+
+    print(small_img.size)
+    print(small_img400.size)
 
 
 
