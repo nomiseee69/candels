@@ -2,12 +2,13 @@ from shape import photo_to_shape
 from market import get_candles, candles_to_df
 from matcher import find_best_match_multi
 from chart import plot_match
-
+from notifier import send_photo, tradingview_link
+PATTERN_NAME = "Двойное дно"
 PHOTO = "w_shape.png"
 INTERVAL = "4h"
-WINDOW = [20,30,40,60,80]
-RECENT = 3
-MIN_SCORE = 0.85
+WINDOW = [20,30,40,60,80,120]
+RECENT = None
+MIN_SCORE = 0.8
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
@@ -37,4 +38,15 @@ else:
     print("\nНайдены совпадения:")
     for score, symbol, start, window_len, df in good[:3]:
         print(f"  {symbol}: {score:.0%}, окно {window_len}")
-        plot_match(df, symbol, start, window_len, score, f"match_{symbol}.png")
+        path = f"match_{symbol}.png"
+        plot_match(df, symbol, start, window_len, score, path)
+
+        begin = df.loc[start, "open_time"]
+        end = df.loc[start + window_len - 1, "open_time"]
+        caption = (
+            f"🔔 {PATTERN_NAME} на {symbol} {INTERVAL}\n"
+            f"Совпадение: {score:.0%}\n"
+            f"Период: {begin:%Y-%m-%d %H:%M} – {end:%Y-%m-%d %H:%M} UTC\n"
+            f"{tradingview_link(symbol, INTERVAL)}"
+        )
+        send_photo(path, caption)
