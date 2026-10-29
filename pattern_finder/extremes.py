@@ -18,6 +18,10 @@ def find_local_maxima(values, window):
         if max(left)<values[i] and max(right)<values[i]:
             maxim.append(i)
     return maxim
+
+
+
+
 if __name__ == '__main__':
     print(find_local_minima(heights,2))
     print(find_local_minima(heights,1))

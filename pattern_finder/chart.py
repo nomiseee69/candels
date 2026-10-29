@@ -13,6 +13,23 @@ def plot_close(df,symbol,path,minima,maxima):
     plt.title(f'{symbol} PRICE')
     plt.savefig(path)
     plt.close()
+def plot_match(df, symbol, start, window_len, score, path):
+    end = start + window_len - 1
+    plt.figure(figsize=(12, 6))
+    plt.plot(df["open_time"], df["close"], label=symbol)
+    plt.axvspan(
+        df.loc[start, "open_time"],
+        df.loc[end, "open_time"],
+        color="orange",
+        alpha=0.3,
+        label=f"Совпадение {score:.0%}",
+    )
+    plt.title(f"{symbol}: найденный паттерн")
+    plt.legend()
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
 if __name__ == "__main__":
     from market import get_candles, candles_to_df
     from extremes import find_local_minima,find_local_maxima
