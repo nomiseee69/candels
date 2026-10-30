@@ -3,3 +3,5 @@ __pycache__/
 *.png
 .env
 user_*.jpg
+users.json
+patterns/

@@ -7,8 +7,8 @@ from notifier import send_photo, tradingview_link
 PATTERN_NAME = "Двойное дно"
 INTERVAL = "4h"
 WINDOWS = [20, 30, 40, 60, 80, 120]
-RECENT = 3
-MIN_SCORE = 0.85
+RECENT = None
+MIN_SCORE = 0.8
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
