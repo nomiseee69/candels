@@ -6,7 +6,7 @@ import requests
 
 from catalog import ALL_PATTERNS
 from notifier import API, TOKEN, send_message, answer_callback
-from storage import add_pattern, get_patterns
+from storage import add_pattern, get_patterns, delete_pattern
 
 waiting = {}
 os.makedirs("patterns", exist_ok=True)

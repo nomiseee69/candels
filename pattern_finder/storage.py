@@ -27,8 +27,9 @@ def delete_pattern(chat_id, index):
     users = load_users()
     key = str(chat_id)
     if key in users:
-        users[key]["patterns"].pop(index)
+        removed = users[key]["patterns"].pop(index)
         save_users(users)
+        return removed
 
 def get_patterns(chat_id):
     users = load_users()
