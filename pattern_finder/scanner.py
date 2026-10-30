@@ -23,7 +23,7 @@ def scan_market(photo_path):
         if not candles:
             continue
         df = candles_to_df(candles)
-        start, score, window_len= find_best_match_multi(df["close"].tolist(), shape, WINDOW, RECENT)
+        start, score, window_len= find_best_match_multi(df["close"].tolist(), shape, WINDOWS, RECENT)
         results.append((score, symbol, start, window_len, df))
         print(f"{symbol}: {score:.0%}, окно {window_len} свечей, начало {df.loc[start, 'open_time']:%Y-%m-%d %H:%M} UTC")
 
