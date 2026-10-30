@@ -11,20 +11,20 @@ API = f"https://api.telegram.org/bot{TOKEN}"
 TV_INTERVALS = {"1h":"60", "4h": "240", "12h": "720", "1d": "D", "1w": "W"}
 
 
-def send_message(text):
+def send_message(text,chat_id=CHAT_ID):
     response = requests.post(
         f"{API}/sendMessage",
-        data={"chat_id": CHAT_ID, "text": text},
+        data={"chat_id": chat_id, "text": text},
         timeout=10,
     )
     return response.status_code == 200
 
 
-def send_photo(path, caption):
+def send_photo(path, caption,chat_id=CHAT_ID):
     with open(path, "rb") as photo:
         response = requests.post(
             f"{API}/sendPhoto",
-            data={"chat_id": CHAT_ID, "caption": caption},
+            data={"chat_id": chat_id, "caption": caption},
             files={"photo": photo},
             timeout=30,
         )
