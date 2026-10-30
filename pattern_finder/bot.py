@@ -7,8 +7,9 @@ import requests
 from catalog import ALL_PATTERNS
 from notifier import API, TOKEN, send_message, answer_callback
 from storage import add_pattern, get_patterns, delete_pattern
-
+from scanner import send_scan_results, scan_user
 waiting = {}
+
 os.makedirs("patterns", exist_ok=True)
 
 def get_updates(offset):
@@ -37,7 +38,9 @@ def menu_keyboard():
             row = []
     if row:
         rows.append(row)
-    rows.append([{"text": "📂 Мои паттерны", "callback_data": "my"}])
+    rows.append([{"text": "📂 Мои паттерны", "callback_data": "my"},
+                 {"text": "🔍 Сканировать", "callback_data": "scan"},
+                 ])
     return {"inline_keyboard": rows}
 
 
@@ -85,11 +88,32 @@ def handle_callback(query):
         send_message("Твои паттерны:\n" + "\n".join(lines), chat_id, {"inline_keyboard": buttons})
         return
 
+    if data == "scan":
+        patterns = get_patterns(chat_id)
+        if not patterns:
+            send_message("Сначала добавь хотя бы один паттерн 👆", chat_id)
+            return
+        send_message("🔍 Сканирую рынок, это займёт до минуты…", chat_id)
+        findings, skipped = scan_user(patterns)
+        if skipped:
+            send_message("Пока не умею искать: " + ", ".join(skipped) + ". Детекторы скоро появятся.", chat_id)
+        if not findings:
+            send_message("Совпадений сейчас нет.", chat_id)
+        else:
+            send_scan_results(findings, chat_id)
+        return
+
     if data.startswith("del:"):
         index = int(data.split(":")[1])
         removed = delete_pattern(chat_id, index)
         send_message(f"🗑 Удалил «{removed['name']}»", chat_id)
         return
+
+    if data.startswith("pick:"):
+        index = int(data.split(":")[1])
+        name = ALL_PATTERNS[index]
+        waiting[chat_id] = name
+        send_message(f"Пришли скриншот паттерна «{name}» 📷", chat_id)
 
 
 def main():
