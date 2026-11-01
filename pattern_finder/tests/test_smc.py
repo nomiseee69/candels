@@ -73,14 +73,42 @@ def test_tiny_gap_is_noise():
     assert find_fvg(candles(rows)) is None
 
 
-def test_old_fvg_is_not_fresh():
-    rows = flat(5) + [
+def old_gap(last_price, candles_after=40):
+    """FVG 100.5–102.0, образовавшийся давно; потом цена стоит на last_price."""
+    p = last_price
+    return flat(5) + [
         (100, 100.5, 99.5, 100.2),
         (100.2, 103.0, 100.1, 102.8),
         (102.8, 104.0, 102.0, 103.5),
-    ] + [(103.5, 104.0, 103.0, 103.6)] * 40   # прошло 40 свечей
-    assert find_fvg(candles(rows)) is None
-    assert find_fvg(candles(rows), lookback=60) is not None
+    ] + [(p, p + 0.4, max(p - 0.4, 102.05), p)] * candles_after
+
+
+def test_old_fvg_far_from_price_is_skipped():
+    # цена 103.6 — до зоны 1.5%, а зона старая (40 свечей): не алертим
+    assert find_fvg(candles(old_gap(103.6))) is None
+
+
+def test_old_fvg_near_price_is_reported():
+    # цена 102.5 — до зоны 0.5%: старый незакрытый уровень снова важен
+    found = find_fvg(candles(old_gap(102.5)))
+    assert found is not None
+    assert found["label"].startswith("старый бычий FVG")
+
+
+def test_history_includes_filled_with_time():
+    rows = flat(20) + [
+        (100, 100.5, 99.5, 100.2),
+        (100.2, 103.0, 100.1, 102.8),
+        (102.8, 104.0, 102.0, 103.5),      # FVG на свечах 20–22
+        (103.5, 103.6, 102.5, 102.8),
+        (102.8, 103.0, 100.2, 100.4),      # свеча 24 закрывает дыру
+    ]
+    gaps = [f for f in find_all_fvg(candles(rows), lookback=100, include_filled=True)
+            if f["kind"] == "bullish_fvg"]
+    assert len(gaps) == 1
+    assert gaps[0]["filled_at"] == 24
+    assert find_all_fvg(candles(rows), lookback=100) == [] or all(
+        f["kind"] != "bullish_fvg" for f in find_all_fvg(candles(rows), lookback=100))
 
 
 def test_quiet_market_has_no_fvg():

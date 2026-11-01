@@ -33,6 +33,27 @@ def send_photo(path, caption, chat_id=CHAT_ID, keyboard=None):
     return response.status_code == 200
 
 
+def send_document(path, caption, chat_id=CHAT_ID, filename=None):
+    """Файл, который пользователь скачает (например, скрипт для TradingView)."""
+    with open(path, "rb") as f:
+        response = requests.post(
+            f"{API}/sendDocument",
+            data={"chat_id": chat_id, "caption": caption},
+            files={"document": (filename or os.path.basename(path), f)},
+            timeout=30,
+        )
+    return response.status_code == 200
+
+
+def edit_keyboard(chat_id, message_id, keyboard):
+    """Меняет кнопки под уже отправленным сообщением (галочки таймфреймов)."""
+    requests.post(
+        f"{API}/editMessageReplyMarkup",
+        data={"chat_id": chat_id, "message_id": message_id, "reply_markup": json.dumps(keyboard)},
+        timeout=10,
+    )
+
+
 def answer_callback(callback_id):
     requests.post(f"{API}/answerCallbackQuery", data={"callback_query_id": callback_id}, timeout=10)
 
