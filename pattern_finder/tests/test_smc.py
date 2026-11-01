@@ -1,0 +1,90 @@
+import numpy as np
+import pandas as pd
+
+from smc import find_all_fvg, find_fvg
+
+
+def candles(rows):
+    """rows: список (open, high, low, close)."""
+    return pd.DataFrame(rows, columns=["open", "high", "low", "close"])
+
+
+def flat(n, price=100.0):
+    """Спокойный рынок: свечи с диапазоном ±0.5 вокруг цены."""
+    return [(price, price + 0.5, price - 0.5, price)] * n
+
+
+def test_bullish_fvg_found():
+    rows = flat(20) + [
+        (100, 100.5, 99.5, 100.2),     # свеча 1: high 100.5
+        (100.2, 103.0, 100.1, 102.8),  # импульс вверх
+        (102.8, 104.0, 102.0, 103.5),  # свеча 3: low 102.0 > 100.5 → дыра 100.5–102.0
+    ] + [(103.5, 104.0, 103.0, 103.6)] * 5
+    found = find_fvg(candles(rows))
+    assert found is not None
+    assert found["kind"] == "bullish_fvg"
+    assert found["zone"] == (100.5, 102.0)
+    assert found["filled"] == 0
+    assert found["score"] >= 0.85
+
+
+def test_bearish_fvg_found():
+    rows = flat(20) + [
+        (100, 100.5, 99.5, 99.8),      # свеча 1: low 99.5
+        (99.8, 99.9, 97.0, 97.2),
+        (97.2, 98.0, 96.0, 96.5),      # свеча 3: high 98.0 < 99.5 → дыра 98.0–99.5
+    ] + [(96.5, 97.0, 96.0, 96.4)] * 5
+    found = find_fvg(candles(rows))
+    assert found is not None and found["kind"] == "bearish_fvg"
+    assert found["zone"] == (98.0, 99.5)
+
+
+def test_filled_fvg_is_ignored():
+    rows = flat(20) + [
+        (100, 100.5, 99.5, 100.2),
+        (100.2, 103.0, 100.1, 102.8),
+        (102.8, 104.0, 102.0, 103.5),
+        (103.5, 103.6, 100.0, 100.3),  # цена вернулась ниже 100.5 — дыра закрыта
+    ] + flat(3, 100.3)
+    kinds = [f["kind"] for f in find_all_fvg(candles(rows))]
+    # бычий FVG закрыт; резкое падение само образовало новый медвежий — это верно
+    assert "bullish_fvg" not in kinds
+
+
+def test_partial_fill_is_reported():
+    rows = flat(20) + [
+        (100, 100.5, 99.5, 100.2),
+        (100.2, 103.0, 100.1, 102.8),
+        (102.8, 104.0, 102.0, 103.5),
+        (103.5, 103.6, 101.25, 101.5),  # залезла в дыру наполовину
+    ]
+    found = find_fvg(candles(rows))
+    assert found is not None
+    assert abs(found["filled"] - 0.5) < 1e-9
+    assert found["distance"] == 0          # цена сейчас внутри зоны
+
+
+def test_tiny_gap_is_noise():
+    rows = flat(20) + [
+        (100, 100.5, 99.5, 100.2),
+        (100.2, 100.8, 100.1, 100.6),
+        (100.6, 101.0, 100.55, 100.9),  # дыра 0.05 при ATR ≈ 1 — шум
+    ]
+    assert find_fvg(candles(rows)) is None
+
+
+def test_old_fvg_is_not_fresh():
+    rows = flat(5) + [
+        (100, 100.5, 99.5, 100.2),
+        (100.2, 103.0, 100.1, 102.8),
+        (102.8, 104.0, 102.0, 103.5),
+    ] + [(103.5, 104.0, 103.0, 103.6)] * 40   # прошло 40 свечей
+    assert find_fvg(candles(rows)) is None
+    assert find_fvg(candles(rows), lookback=60) is not None
+
+
+def test_quiet_market_has_no_fvg():
+    rng = np.random.default_rng(0)
+    close = 100 + np.cumsum(rng.normal(0, 0.05, 100))
+    rows = [(c, c + 0.5, c - 0.5, c) for c in close]   # свечи сильно перекрываются
+    assert find_all_fvg(candles(rows)) == []

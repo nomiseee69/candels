@@ -5,3 +5,4 @@ __pycache__/
 user_*.jpg
 users.json
 patterns/
+!tests/samples/*.png

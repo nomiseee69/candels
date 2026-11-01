@@ -1,85 +1,99 @@
-from shape import photo_to_shape
-from market import get_candles, candles_to_df
+"""Поиск паттернов пользователя по рынку и отправка результатов."""
+
+from catalog import LINE_PATTERNS, RULE_PATTERNS, SHAPE_PATTERNS
+from chart import plot_findings
+from market import candles_to_df, get_candles
 from matcher import find_best_match_multi
-from chart import plot_match
 from notifier import send_photo, tradingview_link
-from catalog import SHAPE_PATTERNS
-PATTERN_NAME = "Двойное дно"
+from shape import photo_to_shape
+from smc import find_fvg
+from trendlines import FAMILY_BY_PATTERN, KIND_NAMES, find_line_pattern
+
 INTERVAL = "4h"
 WINDOWS = [20, 30, 40, 60, 80, 120]
-RECENT = None
-MIN_SCORE = 0.8
+RECENT = 3              # None — искать по всей истории (для проверки)
+MIN_SCORE = 0.85
+CANDLES = 300
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
 ]
 
 
-def scan_market(photo_path):
-    shape = photo_to_shape(photo_path)
-    results = []
-    for symbol in SYMBOLS:
-        candles = get_candles(symbol, INTERVAL, 300)
-        if not candles:
-            continue
-        df = candles_to_df(candles)
-        start, score, window_len= find_best_match_multi(df["close"].tolist(), shape, WINDOWS, RECENT)
-        results.append((score, symbol, start, window_len, df))
-        print(f"{symbol}: {score:.0%}, окно {window_len} свечей, начало {df.loc[start, 'open_time']:%Y-%m-%d %H:%M} UTC")
-
-    results.sort(key=lambda r: r[0], reverse=True)
-    good = []
-    for r in results:
-        if r[0] >= MIN_SCORE:
-            good.append(r)
-    return good[:3]
-
-
-def send_results(good, chat_id):
-    for score, symbol, start, window_len, df in good:
-            print(f"  {symbol}: {score:.0%}, окно {window_len}")
-            path = f"match_{symbol}.png"
-            plot_match(df, symbol, start, window_len, score, path)
-        
-            begin = df.loc[start, "open_time"]
-            end = df.loc[start + window_len - 1, "open_time"]
-            caption = (
-                    f"🔔 {PATTERN_NAME} на {symbol} {INTERVAL}\n"
-                    f"Совпадение: {score:.0%}\n"
-                    f"Период: {begin:%Y-%m-%d %H:%M} – {end:%Y-%m-%d %H:%M} UTC\n"
-                    f"{tradingview_link(symbol, INTERVAL)}"
-                )
-            send_photo(path, caption, chat_id)
-
+# --- детекторы: получили свечи, вернули находку или None ------------------------------------
 def find_shape(df, shape):
+    """Паттерн «по форме» с картинки пользователя."""
     start, score, window_len = find_best_match_multi(df["close"].tolist(), shape, WINDOWS, RECENT)
     if score < MIN_SCORE:
         return None
     return {"score": score, "start": start, "window": window_len}
 
 
-def scan_user(patterns):
-    shapes = []
-    skipped = []
-    for p in patterns:
-        if p["name"] in SHAPE_PATTERNS:
-            shapes.append((p["name"], photo_to_shape(p["photo"])))
-        else:
-            skipped.append(p["name"])
+def find_lines(df, pattern_name, preferred_kind):
+    """Треугольник / клин / канал по линиям тренда, формирующийся прямо сейчас."""
+    found = find_line_pattern(df, FAMILY_BY_PATTERN[pattern_name], preferred_kind)
+    if found is None or found["score"] < MIN_SCORE:
+        return None
+    found["label"] = KIND_NAMES[found["kind"]]
+    return found
 
+
+def find_rule(df, pattern_name):
+    """SMC-паттерны по правилам на свечах."""
+    detect = {"FVG": find_fvg}[pattern_name]
+    found = detect(df)
+    if found is None or found["score"] < MIN_SCORE:
+        return None
+    return found
+
+
+def build_detectors(patterns):
+    """Готовит детектор под каждый паттерн пользователя. Возвращает (детекторы, пропущенные).
+    Одинаковые паттерны (два «Треугольника» одного типа, два FVG) проверяются один раз."""
+    detectors = []
+    skipped = []
+    seen = set()
+    for p in patterns:
+        name = p["name"]
+        if name in SHAPE_PATTERNS:
+            try:
+                shape = photo_to_shape(p["photo"])
+            except (ValueError, OSError):
+                skipped.append(name)
+                continue
+            detectors.append((name, lambda df, s=shape: find_shape(df, s)))
+            continue
+
+        key = (name, p.get("kind"))
+        if key in seen:
+            continue
+        seen.add(key)
+        if name in LINE_PATTERNS:
+            kind = p.get("kind")
+            detectors.append((name, lambda df, n=name, k=kind: find_lines(df, n, k)))
+        elif name in RULE_PATTERNS:
+            detectors.append((name, lambda df, n=name: find_rule(df, n)))
+        elif name not in skipped:
+            skipped.append(name)
+    return detectors, skipped
+
+
+def scan_user(patterns):
+    """Все паттерны пользователя × все монеты. Свечи каждой монеты качаем один раз."""
+    detectors, skipped = build_detectors(patterns)
     findings = {}
-    if not shapes:
+    if not detectors:
         return findings, skipped
 
     for symbol in SYMBOLS:
-        candles = get_candles(symbol, INTERVAL, 300)
+        candles = get_candles(symbol, INTERVAL, CANDLES)
         if not candles:
             continue
         df = candles_to_df(candles)
         items = []
-        for name, shape in shapes:
-            found = find_shape(df, shape)                  # проверь этот паттерн на этой монете
-            if found is not None:                        # нашёлся?
+        for name, detect in detectors:
+            found = detect(df)
+            if found is not None:
                 found["name"] = name
                 items.append(found)
         if items:
@@ -87,20 +101,30 @@ def scan_user(patterns):
     return findings, skipped
 
 
-def send_scan_results(findings, chat_id):
+def describe_item(item):
+    text = f"{item['name']} ({item['score']:.0%})"
+    if item.get("label"):
+        text += f" — {item['label']}"
+    return text
+
+
+def send_scan_results(findings, chat_id, limit=5):
     ordered = sorted(findings.items(), key=lambda kv: len(kv[1]["items"]), reverse=True)
-    for symbol, data in ordered[:5]:
+    for symbol, data in ordered[:limit]:
         df = data["df"]
         items = data["items"]
         best = max(items, key=lambda it: it["score"])
         path = f"scan_{chat_id}_{symbol}.png"
-        plot_match(df, symbol, best["start"], best["window"], best["score"], path)
+        plot_findings(df, symbol, items, path)
 
-        names = " + ".join(f"{it['name']} ({it['score']:.0%})" for it in items)
+        names = "\n".join(f"• {describe_item(it)}" for it in items)
         title = "🔥 Комбинация" if len(items) > 1 else "🔔 Паттерн"
+        begin = df.loc[best["start"], "open_time"]
+        end = df.loc[best["start"] + best["window"] - 1, "open_time"]
         caption = (
             f"{title} на {symbol} {INTERVAL}\n"
             f"{names}\n"
+            f"Период: {begin:%Y-%m-%d %H:%M} – {end:%Y-%m-%d %H:%M} UTC\n"
             f"{tradingview_link(symbol, INTERVAL)}"
         )
         send_photo(path, caption, chat_id)
