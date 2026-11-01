@@ -7,8 +7,11 @@
 import numpy as np
 
 from shape import normalize, resample
+from blocks import all_blocks
 from smc import find_all_fvg
-from trendlines import KIND_NAMES, _analyze_window
+from structure import equal_levels, structure_events
+from texts import plural
+from trendlines import KIND_NAMES, _analyze_window, line_value, shift
 
 HORIZON = 10               # исход смотрим через 10 свечей после паттерна
 SHAPE_STEP = 2             # сдвиг окна при поиске форм (каждые 2 свечи)
@@ -17,15 +20,6 @@ FVG_FILL_WINDOW = 20       # «FVG отработал» = закрылся за 
 
 
 # --- общее ----------------------------------------------------------------------------------
-def plural(n, one, few, many):
-    """Русские окончания: 1 случай, 3 случая, 11 случаев."""
-    if n % 10 == 1 and n % 100 != 11:
-        return f"{n} {one}"
-    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
-        return f"{n} {few}"
-    return f"{n} {many}"
-
-
 def outcome(df, end, horizon=HORIZON):
     """Что сделала цена за horizon свечей после свечи end. None — паттерн слишком свежий."""
     if end + horizon >= len(df):
@@ -43,7 +37,8 @@ def non_overlapping(found):
     """Из пересекающихся находок оставляет лучшие: одно двойное дно не должно
     засчитываться 20 раз со сдвигом окна на пару свечей."""
     kept = []
-    for f in sorted(found, key=lambda f: f["score"], reverse=True):
+    # при равной оценке берём случай, который заканчивается позже: он ближе к пробою
+    for f in sorted(found, key=lambda f: (f["score"], f["start"] + f["window"]), reverse=True):
         a0, a1 = f["start"], f["start"] + f["window"]
         if all(a1 <= k["start"] or a0 >= k["start"] + k["window"] for k in kept):
             kept.append(f)
@@ -69,15 +64,12 @@ def history_shapes(df, shape, windows, min_score):
 # --- треугольники, клинья, каналы ------------------------------------------------------------------
 def _breakout(df, found, horizon=HORIZON):
     """Куда цена вышла из фигуры за horizon свечей: "up", "down" или None."""
-    x0, u0, x1, u1 = found["upper"]
-    _, l0, _, l1 = found["lower"]
-    up_slope = (u1 - u0) / (x1 - x0)
-    lo_slope = (l1 - l0) / (x1 - x0)
+    x1 = found["upper"][2]
     closes = df["close"].to_numpy()
     for x in range(int(x1) + 1, min(int(x1) + 1 + horizon, len(closes))):
-        if closes[x] > u1 + up_slope * (x - x1):
+        if closes[x] > line_value(found["upper"], x):
             return "up"
-        if closes[x] < l1 + lo_slope * (x - x1):
+        if closes[x] < line_value(found["lower"], x):
             return "down"
     return None
 
@@ -85,23 +77,16 @@ def _breakout(df, found, horizon=HORIZON):
 def history_lines(df, family, windows, min_score):
     highs = df["high"].tolist()
     lows = df["low"].tolist()
+    closes = df["close"].tolist()
     n = len(df)
     found = []
     for w in windows:
-        for end in range(w, n + 1, LINE_STEP):
-            f = _analyze_window(highs[end - w:end], lows[end - w:end])
+        # длинные окна двигаем крупнее: фигура на 250 свечей не меняется от сдвига на 5
+        for end in range(w, n + 1, max(LINE_STEP, w // 10)):
+            f = _analyze_window(highs[end - w:end], lows[end - w:end], closes[end - w:end])
             if f is None or f["kind"] not in family or f["score"] < min_score:
                 continue
-            start = end - w
-            x0, u0, x1, u1 = f["upper"]
-            _, l0, _, l1 = f["lower"]
-            f.update({
-                "start": start + x0,
-                "window": w - x0,
-                "upper": (start + x0, u0, start + x1, u1),
-                "lower": (start + x0, l0, start + x1, l1),
-            })
-            found.append(f)
+            found.append(shift(f, end - w))
     found = non_overlapping(found)
     for f in found:
         end = f["start"] + f["window"] - 1
@@ -111,11 +96,48 @@ def history_lines(df, family, windows, min_score):
 
 
 # --- FVG ----------------------------------------------------------------------------------------------
-def history_fvg(df):
-    gaps = find_all_fvg(df, lookback=len(df), include_filled=True)
+def history_fvg(df, significant_only=False):
+    gaps = find_all_fvg(df, lookback=len(df), include_filled=True, significant_only=significant_only)
     for g in gaps:
         g["fill_candles"] = g["filled_at"] - g["end"] if g["filled_at"] is not None else None
     return sorted(gaps, key=lambda g: g["start"])
+
+
+# --- BOS / CHoCH и равные хаи/лои ----------------------------------------------------------------
+def history_structure(df, kind):
+    """Все сломы структуры типа kind ("bos" / "choch") и что было через HORIZON свечей."""
+    events = [e for e in structure_events(df) if e["kind"] == kind]
+    for e in events:
+        e["outcome"] = outcome(df, e["end"])
+    return events
+
+
+def history_equal(df):
+    """Все уровни равных хаёв/лоёв: сняли ли ликвидность и через сколько свечей."""
+    levels = equal_levels(df)
+    for lv in levels:
+        lv["sweep_candles"] = lv["swept_at"] - lv["end"] if lv["swept_at"] is not None else None
+    return levels
+
+
+def history_blocks(df, family):
+    """Все блоки семейства ("ob" / "breaker" / "mitigation") и что было после первого
+    возвращения цены в зону: оттолкнулась ли она в сторону блока."""
+    blocks = [blk for blk in all_blocks(df) if blk["family"] == family]
+    for blk in blocks:
+        touched = blk["touched_at"]
+        blk["outcome"] = outcome(df, touched) if touched is not None else None
+    return blocks
+
+
+def _held(blk):
+    """После ретеста цена ушла в сторону блока (бычий — вверх, медвежий — вниз)?"""
+    return (blk["outcome"]["change"] > 0) == blk["kind"].startswith("bullish")
+
+
+def _followed(e):
+    """Цена через HORIZON свечей ушла в сторону слома?"""
+    return (e["outcome"]["change"] > 0) == (e["direction"] == "up")
 
 
 # --- сводка по нескольким монетам -----------------------------------------------------------------
@@ -133,6 +155,37 @@ def summarize(name, family_kind, results):
         line = f"• {name}: {total} шт. (бычьих {bull}, медвежьих {total - bull}), сейчас открыто {open_now}"
         if judged:
             line += f"\n   закрылись за {FVG_FILL_WINDOW} свечей: {len(quick)} из {len(judged)} ({len(quick) / len(judged):.0%})"
+        return line
+
+    if family_kind == "structure":
+        ups = sum(r["direction"] == "up" for r in results)
+        line = (f"• {name}: {plural(len(results), 'случай', 'случая', 'случаев')} "
+                f"(вверх {ups}, вниз {len(results) - ups})")
+        judged = [r for r in results if r.get("outcome")]
+        if judged:
+            followed = sum(_followed(r) for r in judged)
+            line += (f"\n   через {HORIZON} свечей цена ушла в сторону слома в {followed} из {len(judged)} "
+                     f"({followed / len(judged):.0%})")
+        return line
+
+    if family_kind == "eq":
+        swept = [r for r in results if r["swept_at"] is not None]
+        line = (f"• {name}: {plural(len(results), 'уровень', 'уровня', 'уровней')}, "
+                f"ликвидность снята у {len(swept)}, ещё не снята у {len(results) - len(swept)}")
+        if swept:
+            line += f"\n   в среднем сняли через {np.mean([r['sweep_candles'] for r in swept]):.0f} свечей"
+        return line
+
+    if family_kind == "block":
+        bull = sum(r["kind"].startswith("bullish") for r in results)
+        broken = sum(r["broken_at"] is not None for r in results)
+        line = (f"• {name}: {len(results)} шт. (бычьих {bull}, медвежьих {len(results) - bull}), "
+                f"пробито {broken}, действует {len(results) - broken}")
+        judged = [r for r in results if r.get("outcome")]
+        if judged:
+            held = sum(_held(r) for r in judged)
+            line += (f"\n   после ретеста цена ушла в сторону блока в {held} из {len(judged)} "
+                     f"({held / len(judged):.0%}) за {HORIZON} свечей")
         return line
 
     line = f"• {name}: {plural(len(results), 'случай', 'случая', 'случаев')}"
@@ -177,8 +230,12 @@ def _result(o):
 def describe_occurrence(df, family_kind, f):
     end = f["start"] + f["window"] - 1
     text = _date(df, end)
+    if family_kind == "structure":
+        return f"{text} {'вверх' if f['direction'] == 'up' else 'вниз'} ({_result(f.get('outcome'))})"
     if family_kind == "lines":
         text += f" {SHORT_KIND[f['kind']]}"
+        if f.get("touches"):
+            text += f" ({plural(f['touches'], 'касание', 'касания', 'касаний')})"
         if f.get("breakout"):
             text += ", пробой " + ("вверх" if f["breakout"] == "up" else "вниз")
             result = f.get("outcome")
@@ -205,7 +262,23 @@ def coin_report(symbol, df, entries):
                 line += f"\n   ближайший открытый: {kind} {bottom:.6g}–{top:.6g}, {where}"
             lines.append(line)
             continue
-        newest = sorted(found, key=lambda f: f["start"], reverse=True)
+        if family_kind == "block":
+            active = [blk for blk in found if blk["broken_at"] is None]
+            line = f"• {name}: {len(found)} за период, действует {len(active)}"
+            if active:
+                line += "\n   ближайший: " + min(active, key=lambda blk: blk["distance"])["label"]
+            lines.append(line)
+            continue
+        if family_kind == "eq":
+            waiting = [lv for lv in found if lv["swept_at"] is None]
+            line = f"• {name}: {plural(len(found), 'уровень', 'уровня', 'уровней')}, не снято {len(waiting)}"
+            if waiting:
+                line += "\n   ближайший: " + min(waiting, key=lambda lv: lv["distance"])["label"]
+            lines.append(line)
+            continue
+        # свежие первыми: у сломов структуры — по свече слома, у фигур — по началу
+        newest = sorted(found, key=lambda f: f["end"] if family_kind == "structure" else f["start"],
+                        reverse=True)
         shown = ", ".join(describe_occurrence(df, family_kind, f) for f in newest[:MAX_DATES])
         more = len(found) - MAX_DATES
         lines.append(f"• {name} ×{len(found)}: {shown}" + (f" и ещё {more}" if more > 0 else ""))

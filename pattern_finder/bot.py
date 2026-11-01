@@ -1,31 +1,99 @@
-"""Telegram-бот: меню паттернов, приём скриншотов, проверка распознавания, сканирование."""
+"""Telegram-бот: меню паттернов, приём скриншотов, проверка распознавания, сканирование.
 
+Долгие задачи (сканирование, история, разметка, автоскан) идут в фоновых потоках,
+поэтому бот отвечает на кнопки, пока ищет паттерны."""
+
+import itertools
 import os
+import threading
 import time
 import traceback
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
-from catalog import ALL_PATTERNS, SEARCHABLE
+from catalog import ALL_PATTERNS, RULE_PATTERNS, SEARCHABLE
 from notifier import (
     API, TOKEN, answer_callback, edit_keyboard, send_document, send_message, send_photo,
 )
 from autoscan import Schedule, run_autoscan
-from pine import PINE_HELP, pine_script
-from scanner import ALL_INTERVALS, draw_card, full_markup, history_user, scan_user
-from storage import (
-    add_pattern, delete_pattern, get_autoscan, get_intervals, get_patterns,
-    toggle_autoscan, toggle_interval,
+from pine import pine_help, pine_script
+from market import top_symbols
+from scanner import (
+    ALL_INTERVALS, COIN_OPTIONS, MAX_CARDS, cards_overview, draw_coin, full_markup,
+    group_by_coin, history_user, scan_user,
 )
+from storage import (
+    add_pattern, delete_pattern, get_autoscan, get_coins, get_intervals, get_patterns,
+    get_settings, set_coins, toggle_autoscan, toggle_interval, toggle_setting,
+)
+from texts import plural
+from version import VERSION
 from trendlines import KIND_NAMES, kind_from_drawing
 from vision import analyze_screenshot, describe_lines, draw_debug
 
 PATTERNS_DIR = "patterns"
 os.makedirs(PATTERNS_DIR, exist_ok=True)
 
-waiting = {}      # chat_id → название паттерна, для которого ждём фото
-last_cards = {}   # chat_id → карточки последнего сканирования/истории (для кнопки разметки)
+waiting = {}       # chat_id → название паттерна, для которого ждём фото
 MAX_MESSAGE = 4000
+KEEP_CARDS = 300   # сколько последних находок помним на пользователя (для кнопок под ними)
+OVERVIEW_BUTTONS = 39
+
+# --- фоновые задачи ------------------------------------------------------------------------
+jobs = ThreadPoolExecutor(max_workers=3)          # сканирования и история пользователей
+autoscan_jobs = ThreadPoolExecutor(max_workers=1) # автоскан — по одному таймфрейму за раз
+busy = set()                                      # кто сейчас ждёт результат
+busy_lock = threading.Lock()
+chart_lock = threading.Lock()                     # matplotlib не умеет рисовать в двух потоках сразу
+
+
+def start_job(chat_id, func, *args):
+    """Запускает долгую задачу в фоне. Одному человеку — одна задача за раз."""
+    with busy_lock:
+        if chat_id in busy:
+            send_message("⏳ Ещё работаю над прошлым запросом — пришлю, как закончу.", chat_id)
+            return
+        busy.add(chat_id)
+
+    def run():
+        try:
+            func(chat_id, *args)
+        except Exception as error:
+            print("Ошибка в фоновой задаче:", error)
+            traceback.print_exc()
+            send_message("😕 Что-то пошло не так, попробуй ещё раз чуть позже.", chat_id)
+        finally:
+            with busy_lock:
+                busy.discard(chat_id)
+
+    jobs.submit(run)
+
+
+# --- находки: храним по номеру, чтобы кнопки под старыми сообщениями не путались -------------
+card_ids = itertools.count(1)
+cards_by_chat = {}       # chat_id → OrderedDict(номер → карточка)
+cards_lock = threading.Lock()
+
+
+def remember_cards(chat_id, cards):
+    """Даёт каждой находке номер и запоминает. Возвращает номера."""
+    with cards_lock:
+        store = cards_by_chat.setdefault(chat_id, OrderedDict())
+        ids = []
+        for card in cards:
+            card_id = next(card_ids)
+            store[card_id] = card
+            ids.append(card_id)
+        while len(store) > KEEP_CARDS:
+            store.popitem(last=False)
+    return ids
+
+
+def find_card(chat_id, card_id):
+    with cards_lock:
+        return cards_by_chat.get(chat_id, {}).get(card_id)
 
 TIPS = (
     "Как сделать скриншот, чтобы я его понял:\n"
@@ -76,7 +144,7 @@ def menu_keyboard(chat_id=None):
     ])
     rows.append([
         {"text": "📊 История", "callback_data": "history"},
-        {"text": "⏱ Таймфреймы", "callback_data": "tf"},
+        {"text": "⚙️ Настройки", "callback_data": "settings"},
     ])
     auto_on = chat_id is not None and get_autoscan(chat_id)
     rows.append([{"text": "🔔 Автоскан: включён" if auto_on else "🔕 Автоскан: выключен",
@@ -86,7 +154,57 @@ def menu_keyboard(chat_id=None):
 
 def show_menu(chat_id):
     tfs = ", ".join(i.upper() for i in get_intervals(chat_id))
-    send_message(f"Выбери паттерн, который хочешь искать (таймфреймы: {tfs}):", chat_id, menu_keyboard(chat_id))
+    send_message(f"Выбери паттерн, который хочешь искать (таймфреймы: {tfs}, "
+                 f"монеты: топ-{get_coins(chat_id)} по объёму):", chat_id, menu_keyboard(chat_id))
+
+
+RULE_HELP = {
+    "FVG": "FVG ищу по правилам на свечах: дыра между 1-й и 3-й свечой "
+           "(значимые — от импульсной свечи, см. ⚙️ Настройки).",
+    "BOS": "BOS ищу по правилам: цена ЗАКРЫЛАСЬ за последним свингом по тренду.",
+    "CHoCH": "CHoCH ищу по правилам: первый слом структуры против тренда.",
+    "EQH / EQL": "EQH/EQL ищу по правилам: 2+ свинга почти на одной цене, ликвидность ещё не снята.",
+    "Order Block": "Order Block ищу по правилам: последняя свеча против движения перед сломом структуры. "
+                   "Пришлю, когда блок сложился или цена вернулась к нему.",
+    "Breaker Block": "Breaker ищу по правилам: Order Block, который пробили, — бывшее сопротивление "
+                     "стало поддержкой (или наоборот).",
+    "Mitigation Block": "Mitigation ищу по правилам: провал движения без снятия ликвидности "
+                        "(более высокий лой / более низкий хай) и пробой свинга.",
+}
+
+
+def settings_text(chat_id):
+    tfs = ", ".join(i.upper() for i in get_intervals(chat_id))
+    return (f"⚙️ Настройки поиска\n"
+            f"Таймфреймы: {tfs}\n"
+            f"Монеты: топ-{get_coins(chat_id)} по объёму\n\n"
+            "🎯 Значимые FVG — импульсная свеча сломала структуру, дыра ≥ 0.75 ATR и объём выше "
+            "обычного; зона отработана, когда свеча закрылась за её серединой. "
+            "«Все» — любая дыра больше 0.5 ATR.\n"
+            "🧩 Только комбинации — присылать монеты, где одновременно нашлось 2+ твоих паттерна.")
+
+
+def settings_keyboard(chat_id):
+    settings = get_settings(chat_id)
+    tfs = ", ".join(i.upper() for i in get_intervals(chat_id))
+    fvg = "🎯 FVG: только значимые" if settings["fvg"] == "significant" else "🎯 FVG: все"
+    combos = "🧩 Только комбинации: да" if settings["combos_only"] else "🧩 Только комбинации: нет"
+    return {"inline_keyboard": [
+        [{"text": f"⏱ Таймфреймы: {tfs}", "callback_data": "tf"}],
+        [{"text": f"🪙 Монеты: топ-{get_coins(chat_id)}", "callback_data": "coins"}],
+        [{"text": fvg, "callback_data": "set:fvg"}],
+        [{"text": combos, "callback_data": "set:combos_only"}],
+        [{"text": "⬅️ В меню", "callback_data": "menu"}],
+    ]}
+
+
+def coins_keyboard(chat_id):
+    chosen = get_coins(chat_id)
+    row = [
+        {"text": ("✅ " if n == chosen else "") + str(n), "callback_data": f"coins:{n}"}
+        for n in COIN_OPTIONS
+    ]
+    return {"inline_keyboard": [row]}
 
 
 def interval_keyboard(chat_id):
@@ -102,6 +220,18 @@ def interval_keyboard(chat_id):
 def receive_pattern_photo(chat_id, name, file_id):
     path = f"{PATTERNS_DIR}/{chat_id}_{int(time.time() * 1000)}.jpg"
     download_photo(file_id, path)
+
+    if name in RULE_PATTERNS:
+        # SMC по правилам: скрин — пример для тебя, искать его форму не нужно
+        pattern_id = add_pattern(chat_id, name, path)
+        keyboard = {"inline_keyboard": [[
+            {"text": "✅ Ок", "callback_data": f"ok:{pattern_id}"},
+            {"text": "❌ Удалить", "callback_data": f"bad:{pattern_id}"},
+        ]]}
+        send_message(f"Сохранил «{name}» 👍\n{RULE_HELP[name]}\n"
+                     "Скрин оставил как твой пример — на рынке ищу по правилам, а не по картинке.",
+                     chat_id, keyboard)
+        return
 
     analysis = analyze_screenshot(path)
     if not analysis.ok:
@@ -176,34 +306,80 @@ def split_text(text, limit=MAX_MESSAGE):
     return parts
 
 
-def send_cards(chat_id, cards):
-    """Отправляет карточки: график + подпись + кнопка «разметка для TradingView»."""
-    last_cards[chat_id] = cards
-    for index, card in enumerate(cards):
-        path = draw_card(card, f"card_{chat_id}_{index}.png")
-        keyboard = {"inline_keyboard": [[
-            {"text": "📈 Разметка для TradingView", "callback_data": f"pine:{index}"},
-        ]]}
-        send_photo(path, card["caption"], chat_id, keyboard)
+CAPTION_LIMIT = 1000   # подпись к фото в Telegram — до 1024 символов
+
+
+def send_card(chat_id, card_id, coin):
+    """Одна монета со всеми таймфреймами: график + подпись + кнопка разметки на все ТФ."""
+    path = f"card_{chat_id}_{card_id}.png"
+    with chart_lock:
+        draw_coin(coin, path)
+    tfs = len({f["interval"] for f in coin["frames"]})
+    keyboard = {"inline_keyboard": [[
+        {"text": "📈 Разметка для TradingView" + (" (все ТФ)" if tfs > 1 else ""),
+         "callback_data": f"pine:{card_id}"},
+    ]]}
+    caption = coin["caption"]
+    try:
+        if len(caption) <= CAPTION_LIMIT:
+            send_photo(path, caption, chat_id, keyboard)
+        else:                                  # длинная подпись — фото с заголовком, текст следом
+            send_photo(path, caption.split("\n")[0] + "\n(подробности ниже)", chat_id)
+            send_message(caption, chat_id, keyboard)
+    finally:
         remove_file(path)
 
 
-def send_pine(chat_id, index):
-    cards = last_cards.get(chat_id, [])
-    if index >= len(cards):
+def overview_keyboard(ids, coins):
+    buttons = [
+        {"text": coin["symbol"].removesuffix("USDT"), "callback_data": f"card:{card_id}"}
+        for card_id, coin in zip(ids[:OVERVIEW_BUTTONS], coins[:OVERVIEW_BUTTONS])
+    ]
+    return {"inline_keyboard": [buttons[i:i + 4] for i in range(0, len(buttons), 4)]}
+
+
+def send_cards(chat_id, coins):
+    """Лучшие монеты — графиками (все ТФ монеты в одном сообщении), остальные — списком
+    с кнопками. coins — результат group_by_coin."""
+    ids = remember_cards(chat_id, coins)
+    for card_id, coin in zip(ids[:MAX_CARDS], coins[:MAX_CARDS]):
+        send_card(chat_id, card_id, coin)
+    rest = coins[MAX_CARDS:]
+    if rest:
+        text = cards_overview(rest)
+        for part in split_text(text)[:-1]:
+            send_message(part, chat_id)
+        send_message(split_text(text)[-1], chat_id, overview_keyboard(ids[MAX_CARDS:], rest))
+
+
+def show_card(chat_id, card_id):
+    card = find_card(chat_id, card_id)
+    if card is None:
         send_message("Эта находка устарела — запусти сканирование ещё раз.", chat_id)
         return
-    card = cards[index]
-    send_message("📈 Собираю разметку всех паттернов на этом графике…", chat_id)
-    groups = full_markup(get_patterns(chat_id), card)
-    code = pine_script(card["symbol"], card["interval"], groups)
-    filename = f"{card['symbol']}_{card['interval']}_patterns.pine.txt"
-    path = f"pine_{chat_id}_{index}.txt"
+    send_card(chat_id, card_id, card)
+
+
+def send_pine(chat_id, card_id):
+    coin = find_card(chat_id, card_id)
+    if coin is None:
+        send_message("Эта находка устарела — запусти сканирование ещё раз.", chat_id)
+        return
+    intervals = get_intervals(chat_id)
+    tfs = ", ".join(i.upper() for i in intervals)
+    send_message(f"📈 Собираю разметку {coin['symbol']} по всем твоим таймфреймам ({tfs})…", chat_id)
+    groups = full_markup(get_patterns(chat_id), coin, intervals, get_settings(chat_id))
+    first = coin["frames"][0]["interval"]
+    code = pine_script(coin["symbol"], first, groups)
+    filename = f"{coin['symbol']}_patterns.pine.txt"
+    path = f"pine_{chat_id}_{card_id}.txt"
     with open(path, "w", encoding="utf-8") as f:
         f.write(code)
-    help_text = PINE_HELP.format(symbol=card["symbol"], interval=card["interval"])
-    send_document(path, help_text, chat_id, filename)
-    remove_file(path)
+    help_text = pine_help(coin["symbol"], first, groups)
+    try:
+        send_document(path, help_text, chat_id, filename)
+    finally:
+        remove_file(path)
 
 
 def report_skipped(chat_id, skipped):
@@ -218,13 +394,37 @@ def run_scan(chat_id):
         return
     intervals = get_intervals(chat_id)
     tfs = ", ".join(i.upper() for i in intervals)
-    send_message(f"🔍 Сканирую рынок ({tfs}), это займёт до минуты…", chat_id)
-    cards, skipped = scan_user(patterns, intervals)
+    coins = get_coins(chat_id)
+    send_message(f"🔍 Сканирую топ-{coins} монет ({tfs}), {wait_text(coins, intervals)}…", chat_id)
+    settings = get_settings(chat_id)
+    cards, skipped = scan_user(patterns, intervals, symbols=top_symbols(coins), settings=settings)
     report_skipped(chat_id, skipped)
     if not cards:
-        send_message("Совпадений сейчас нет.", chat_id)
-    else:
-        send_cards(chat_id, cards)
+        text = "Совпадений сейчас нет."
+        if settings["combos_only"]:
+            text += " Включено «только комбинации» — одиночные находки не показываю (⚙️ Настройки)."
+        send_message(text, chat_id)
+        return
+    coins_found = group_by_coin(cards)
+    combos = sum(any(len(f["items"]) > 1 for f in c["frames"]) for c in coins_found)
+    multi = sum(len(c["frames"]) > 1 for c in coins_found)
+    summary = f"Нашлось на {plural(len(coins_found), 'монете', 'монетах', 'монетах')}"
+    extras = []
+    if combos:
+        extras.append(f"комбинации: {combos}")
+    if multi:
+        extras.append(f"на нескольких ТФ сразу: {multi}")
+    if extras:
+        summary += " (" + ", ".join(extras) + ")"
+    more = f". Показываю {MAX_CARDS} лучших, остальные — списком." if len(coins_found) > MAX_CARDS else "."
+    send_message(summary + more, chat_id)
+    send_cards(chat_id, coins_found)
+
+
+def wait_text(coins, intervals):
+    """Примерно сколько ждать: ~0.15 с на монету и таймфрейм."""
+    seconds = coins * len(intervals) * 0.15
+    return "это займёт до минуты" if seconds <= 60 else f"это займёт ~{round(seconds / 60)} мин"
 
 
 def run_history(chat_id):
@@ -233,13 +433,15 @@ def run_history(chat_id):
         send_message("Сначала добавь хотя бы один паттерн 👆", chat_id)
         return
     intervals = get_intervals(chat_id)
-    send_message("📊 Считаю историю по всем монетам, это займёт до минуты…", chat_id)
-    reports, cards, skipped = history_user(patterns, intervals)
+    coins = get_coins(chat_id)
+    send_message(f"📊 Считаю историю по топ-{coins} монет, {wait_text(coins * 2, intervals)}…", chat_id)
+    reports, cards, skipped = history_user(patterns, intervals, symbols=top_symbols(coins),
+                                           settings=get_settings(chat_id))
     report_skipped(chat_id, skipped)
     for report in reports:
         for part in split_text(report):
             send_message(part, chat_id)
-    send_cards(chat_id, cards)
+    send_cards(chat_id, group_by_coin(cards))
 
 
 def handle_callback(query):
@@ -252,11 +454,24 @@ def handle_callback(query):
         return
 
     if data == "scan":
-        run_scan(chat_id)
+        start_job(chat_id, run_scan)
         return
 
     if data == "history":
-        run_history(chat_id)
+        start_job(chat_id, run_history)
+        return
+
+    if data == "coins":
+        send_message("Сколько самых торгуемых монет Binance проверять? Чем больше — тем дольше "
+                     "сканирование, но больше находок.", chat_id, coins_keyboard(chat_id))
+        return
+
+    if data == "settings":
+        send_message(settings_text(chat_id), chat_id, settings_keyboard(chat_id))
+        return
+
+    if data == "menu":
+        show_menu(chat_id)
         return
 
     if data == "tf":
@@ -265,7 +480,7 @@ def handle_callback(query):
         return
 
     if data == "tf_done":
-        show_menu(chat_id)
+        send_message(settings_text(chat_id), chat_id, settings_keyboard(chat_id))
         return
 
     if data == "auto":
@@ -287,7 +502,26 @@ def handle_callback(query):
         return
 
     if action == "pine":
-        send_pine(chat_id, int(value))
+        start_job(chat_id, send_pine, int(value))
+        return
+
+    if action == "card":
+        start_job(chat_id, show_card, int(value))
+        return
+
+    if action == "coins":
+        set_coins(chat_id, int(value))
+        send_message(f"🪙 Буду проверять топ-{value} монет по объёму торгов.", chat_id)
+        send_message(settings_text(chat_id), chat_id, settings_keyboard(chat_id))
+        return
+
+    if action == "set":
+        settings = toggle_setting(chat_id, value)
+        edit_keyboard(chat_id, query["message"]["message_id"], settings_keyboard(chat_id))
+        searchable = {p["name"] for p in get_patterns(chat_id) if p["name"] in SEARCHABLE}
+        if value == "combos_only" and settings["combos_only"] and len(searchable) < 2:
+            send_message("⚠️ Для комбинаций нужно минимум 2 разных паттерна — сейчас находок не будет. "
+                         "Добавь ещё паттерн из меню.", chat_id)
         return
 
     if action == "pick":
@@ -312,21 +546,27 @@ def handle_callback(query):
 
 
 # --- главный цикл --------------------------------------------------------------------------
+def autoscan_job(intervals):
+    try:
+        sent = run_autoscan(intervals, send_cards, send_message)
+        print(f"Автоскан {', '.join(intervals)}: отправлено монет {sent}")
+    except Exception as error:
+        print(f"Ошибка автоскана {intervals}:", error)
+        traceback.print_exc()
+
+
 def check_schedule(schedule):
-    """Если у какого-то таймфрейма закрылась свеча — автоскан для подписчиков."""
-    for interval in schedule.due(time.time()):
-        try:
-            sent = run_autoscan(interval, send_cards, send_message)
-            print(f"Автоскан {interval}: отправлено карточек {sent}")
-        except Exception as error:
-            print(f"Ошибка автоскана {interval}:", error)
-            traceback.print_exc()
+    """Если закрылись свечи (в 00:00 UTC закрываются сразу 1H, 4H, 12H и 1D) —
+    один автоскан на все эти ТФ, чтобы монета пришла одним сообщением."""
+    due = schedule.due(time.time())
+    if due:
+        autoscan_jobs.submit(autoscan_job, due)
 
 
 def main():
     offset = 0
     schedule = Schedule(time.time())
-    print("Бот запущен. Остановить: Ctrl+C")
+    print(f"Бот запущен (обновление {VERSION}). Остановить: Ctrl+C")
     while True:
         check_schedule(schedule)
         try:

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -114,3 +116,65 @@ def test_drawing_channel():
 def test_user_screenshot_is_symmetric_triangle(user_triangle):
     a = analyze_screenshot(user_triangle)
     assert kind_from_drawing(a.lines) == "symmetric"
+
+
+# --- настоящий график: канал, который нарисовал пользователь ----------------------------------
+def screenshot_candles(path, px=3):
+    """Свечи прямо со скриншота: каждые px пикселей по горизонтали — одна «свеча»,
+    её high/low — верх и низ свечей на картинке (в пикселях, ось вверх)."""
+    from vision import (_top_run, colored_mask, detect_background, erase_dotted, erase_lines,
+                        find_lines, foreground_mask, keep_main_cluster, load_image)
+    img = load_image(path)
+    h = img.shape[0]
+    fg = foreground_mask(img, detect_background(img))
+    mask = erase_dotted(erase_lines(fg, find_lines(fg)))           # стираем линии пользователя
+    mask = keep_main_cluster(erase_dotted(colored_mask(img) & mask))
+    xs, highs, lows = [], [], []
+    for x0 in range(0, mask.shape[1] - px + 1, px):
+        rows = np.where(mask[:, x0:x0 + px].any(axis=1))[0]
+        if len(rows):
+            run = _top_run(rows)
+            xs.append(x0)
+            highs.append(h - 1 - run[0])
+            lows.append(h - 1 - run[-1])
+    highs, lows = np.array(highs, float), np.array(lows, float)
+    mid = (highs + lows) / 2
+    df = pd.DataFrame({"open": np.roll(mid, 1), "high": highs, "low": lows, "close": mid})
+    return np.array(xs), h, df
+
+
+def test_real_channel_matches_users_drawing():
+    from trendlines import _analyze_window
+    path = str(Path(__file__).parent / "samples" / "dark_channel_down.png")
+    drawn = analyze_screenshot(path).lines
+    assert kind_from_drawing(drawn) == "channel_down"
+    xs, h, df = screenshot_candles(path)
+    found = _analyze_window(df["high"].tolist(), df["low"].tolist(), df["close"].tolist())
+    assert found is not None and found["kind"] == "channel_down"
+    assert found["touches"] >= 5 and found["score"] >= 0.85
+    # верхняя линия бота совпадает с линией пользователя (±12 пикселей) в начале и в конце
+    top = min(drawn, key=lambda ln: ln.y_at(500))
+    x0, y0, x1, y1 = found["upper"]
+    for i in (x0 + 20, x1 - 20):
+        bot_y = h - 1 - (y0 + (y1 - y0) * (i - x0) / (x1 - x0))
+        assert abs(bot_y - top.y_at(xs[int(i)])) <= 12
+
+
+def test_two_touches_per_line_is_not_enough():
+    # по две вершины и два дна: через две точки прямая проходит всегда — это ещё не фигура
+    df = make_df(with_history(zigzag(110, 103, 90, 99, n=40, waves=2)))
+    found = find_line_pattern(df, TRIANGLES)
+    assert found is None or found["score"] < 0.85
+
+
+def test_each_line_starts_at_its_first_touch():
+    from trendlines import _analyze_window
+    # верх касается рано, низ — только со свечи ~20: нижняя линия не должна начинаться раньше
+    prices = zigzag(110, 103, 90, 99, n=60, waves=4)
+    prices[:18] = np.maximum(prices[:18], 100)          # первые дны «приподняты» — касаний внизу нет
+    df = make_df(with_history(prices, history=10))
+    found = _analyze_window(df["high"].tolist(), df["low"].tolist(), df["close"].tolist())
+    assert found is not None
+    assert found["lower"][0] > found["upper"][0]
+    xs = [x for x, _ in found["touch_points"]]
+    assert len(xs) == found["touches"] and min(xs) == found["upper"][0]

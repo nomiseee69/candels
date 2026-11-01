@@ -1,10 +1,11 @@
 """Автоскан: бот сам проверяет рынок после закрытия каждой свечи
 и присылает только НОВЫЕ находки тем, кто включил автоскан."""
 
+import threading
 import time
 
-from scanner import alert_caption, scan_user
-from market import get_candles
+from scanner import alert_caption, group_by_coin, scan_user
+from market import get_candles, top_symbols
 from storage import add_sent, autoscan_users, get_sent
 
 INTERVAL_SECONDS = {"1h": 3600, "4h": 14400, "12h": 43200, "1d": 86400, "1w": 604800}
@@ -61,24 +62,32 @@ def is_new(entry, sent):
 def cached_fetch():
     """Загрузка свечей с кэшем: если автоскан включён у 50 человек, биржу спрашиваем один раз."""
     cache = {}
+    lock = threading.Lock()
 
     def fetch(symbol, interval, limit):
         key = (symbol, interval, limit)
-        if key not in cache:
-            cache[key] = get_candles(symbol, interval, limit)
-        return cache[key]
+        with lock:
+            if key in cache:
+                return cache[key]
+        candles = get_candles(symbol, interval, limit)     # качаем без замка — параллельно
+        with lock:
+            cache[key] = candles
+        return candles
     return fetch
 
 
-def run_autoscan(interval, send_cards, send_message, now=None):
-    """Проверяет таймфрейм interval для всех подписчиков. Возвращает число отправленных карточек."""
+def run_autoscan(due, send_cards, send_message, now=None):
+    """Проверяет таймфреймы due (у них только что закрылась свеча) для всех подписчиков.
+    Находки одной монеты на разных ТФ приходят одним сообщением. Возвращает число монет."""
     now = now or time.time()
+    due = [due] if isinstance(due, str) else list(due)
     fetch = cached_fetch()
     total = 0
-    for chat_id, patterns, intervals in autoscan_users():
-        if interval not in intervals:
+    for chat_id, patterns, intervals, coins, settings in autoscan_users():
+        mine = [i for i in due if i in intervals]
+        if not mine:
             continue
-        cards, _ = scan_user(patterns, [interval], fetch)
+        cards, _ = scan_user(patterns, mine, fetch, top_symbols(coins), settings)
         sent = get_sent(chat_id)
         new_cards, new_entries = [], []
         for card in cards:
@@ -88,11 +97,12 @@ def run_autoscan(interval, send_cards, send_message, now=None):
                 continue
             items = [item for item, _ in fresh]
             new_cards.append({**card, "items": items,
-                              "caption": alert_caption(card["symbol"], interval, card["df"], items)})
+                              "caption": alert_caption(card["symbol"], card["interval"], card["df"], items)})
             new_entries += [e for _, e in fresh]
         if new_cards:
-            send_message(f"🔔 Автоскан {interval.upper()}: новые находки", chat_id)
-            send_cards(chat_id, new_cards)
+            send_message(f"🔔 Автоскан {', '.join(i.upper() for i in mine)}: новые находки", chat_id)
+            coins_found = group_by_coin(new_cards)
+            send_cards(chat_id, coins_found)
             add_sent(chat_id, new_entries, now)
-            total += len(new_cards)
+            total += len(coins_found)
     return total

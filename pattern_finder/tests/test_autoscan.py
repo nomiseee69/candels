@@ -50,7 +50,7 @@ def fake_df(n=50):
 
 
 def test_autoscan_sends_only_new(tmp_path):
-    original = storage.FILE
+    original = storage.FILE, autoscan.scan_user, autoscan.top_symbols
     storage.FILE = str(tmp_path / "users.json")
     try:
         users = {"7": {"patterns": [{"id": "1", "name": "FVG", "photo": "x"}],
@@ -60,7 +60,8 @@ def test_autoscan_sends_only_new(tmp_path):
         card = {"symbol": "BTCUSDT", "interval": "4h", "df": df, "history": False, "caption": "",
                 "items": [{"name": "FVG", "score": 0.9, "start": 40, "window": 10,
                            "kind": "bullish_fvg", "zone": (99.0, 100.0)}]}
-        autoscan.scan_user = lambda patterns, intervals, fetch: ([dict(card)], [])
+        autoscan.scan_user = lambda patterns, intervals, fetch, symbols, settings: ([dict(card)], [])
+        autoscan.top_symbols = lambda n: ["BTCUSDT"]
         sent_cards, messages = [], []
         send_cards = lambda chat_id, cards: sent_cards.extend(cards)
         send_message = lambda text, chat_id: messages.append(text)
@@ -70,4 +71,4 @@ def test_autoscan_sends_only_new(tmp_path):
         assert autoscan.run_autoscan("1d", send_cards, send_message, now=1e9) == 0          # 1d не выбран
         assert len(sent_cards) == 1 and "Автоскан 4H" in messages[0]
     finally:
-        storage.FILE = original
+        storage.FILE, autoscan.scan_user, autoscan.top_symbols = original

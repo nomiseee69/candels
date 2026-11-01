@@ -19,6 +19,8 @@ SHAPE_PATTERNS = ["Двойное дно", "Двойная вершина", "Г�
 LINE_PATTERNS = ["Треугольник", "Клин", "Канал"]
 
 # ищутся по правилам на свечах (smc)
-RULE_PATTERNS = ["FVG"]
+RULE_PATTERNS = [
+    "FVG", "BOS", "CHoCH", "EQH / EQL", "Order Block", "Breaker Block", "Mitigation Block",
+]
 
 SEARCHABLE = SHAPE_PATTERNS + LINE_PATTERNS + RULE_PATTERNS

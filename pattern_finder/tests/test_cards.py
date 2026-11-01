@@ -35,18 +35,33 @@ def test_intervals_toggle(tmp_path):
 def test_pine_current_triangle_lines_end_at_apex():
     df = df_with_times()
     # верх 110 → 104, низ 90 → 98 на 39 свечах: сходятся, вершина впереди
-    items = [{"name": "Треугольник", "score": 0.97, "start": 10, "window": 40,
+    items = [{"name": "Треугольник", "score": 0.97, "start": 10, "window": 40, "touches": 6,
               "upper": (10, 110.0, 49, 104.0), "lower": (10, 90.0, 49, 98.0)}]
     code = pine_script("BTCUSDT", "4h", [(df, items, False)])
     t10 = int(df["open_time"].iloc[10].timestamp() * 1000)
     assert code.startswith("//@version=5")
-    assert 'indicator("Pattern Finder · BTCUSDT 4h", overlay=true' in code
+    assert 'indicator("Pattern Finder v11 · BTCUSDT 4H", overlay=true' in code
     assert f"line.new({t10}, 110," in code
     assert code.count("line.new(") == 2
     assert "extend.right" not in code                 # линии не уходят в бесконечность
     # вершина: 104 - 6/39*k = 98 + 8/39*k → k ≈ 16.7 свечи после конца, цена 104 - 2.57 = 101.43
     assert code.count("101.4285714286") == 2         # обе линии сходятся в одной точке
-    assert '"Треугольник 97%"' in code and "color.blue" in code
+    assert '"СЕЙЧАС · Треугольник · 6 касаний"' in code and "color.blue" in code
+
+
+def test_past_figures_are_marked_and_explained():
+    from pine import pine_help
+    df = df_with_times()
+    past = [{"name": "Канал", "score": 0.9, "start": 5, "window": 20, "touches": 5,
+             "upper": (5, 110.0, 24, 108.0), "lower": (5, 100.0, 24, 98.0), "outcome": {"change": -0.02}}]
+    now = [{"name": "FVG", "score": 0.9, "start": 45, "window": 5, "kind": "bullish_fvg",
+            "zone": (100.0, 101.0), "filled_at": None}]
+    groups = [(df, past, True), (df, now, False)]
+    code = pine_script("BTCUSDT", "4h", groups)
+    assert '"был · Канал · 05.10.26"' in code                 # прошлый — с датой окончания
+    assert "color=color.new(color.red, 35), width=1" in code and "width=2" not in code
+    text = pine_help("BTCUSDT", "4h", groups)
+    assert "Сейчас найдено: FVG" in text and "1 прошлый случай" in text
 
 
 def test_pine_open_and_closed_fvg():
