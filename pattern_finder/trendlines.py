@@ -239,11 +239,16 @@ def _still_inside(found, last_close):
     return lower_end * (1 - BREAKOUT_TOLERANCE) <= last_close <= upper_end * (1 + BREAKOUT_TOLERANCE)
 
 
-def find_line_pattern(df, family, preferred=None, windows=WINDOWS):
+SIMILARITY_WEIGHT = 0.3     # насколько похожесть на пример пользователя влияет на выбор окна
+
+
+def find_line_pattern(df, family, preferred=None, windows=WINDOWS, similarity=None):
     """Лучшая фигура нужного семейства, которая формируется прямо сейчас (или None).
 
     family — набор типов (TRIANGLES, WEDGES, CHANNELS);
-    preferred — тип с рисунка пользователя: совпадение повышает оценку.
+    preferred — тип с рисунка пользователя: совпадение повышает оценку;
+    similarity — функция (df, фигура) → похожесть на пример пользователя 0..1 или None:
+    из нескольких окон выбирается фигура, больше похожая на его рисунок.
     """
     highs_all = df["high"].tolist()
     lows_all = df["low"].tolist()
@@ -263,7 +268,13 @@ def find_line_pattern(df, family, preferred=None, windows=WINDOWS):
             found["score"] = min(1.0, found["score"] + 0.05) if found["kind"] == preferred else found["score"] - 0.1
 
         shift(found, len(df) - w)         # фигура начинается с первого касания линий
+        if similarity is not None:
+            found["similarity"] = similarity(df, found)
         # при почти равной оценке лучше длинное окно — оно захватывает фигуру целиком
-        if best is None or found["score"] + 0.0005 * found["window"] > best["score"] + 0.0005 * best["window"]:
+        found["_rank"] = (found["score"] + 0.0005 * found["window"]
+                          + SIMILARITY_WEIGHT * (found.get("similarity") or 0))
+        if best is None or found["_rank"] > best["_rank"]:
             best = found
+    if best is not None:
+        best.pop("_rank")
     return best

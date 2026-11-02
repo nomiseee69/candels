@@ -8,13 +8,15 @@ from catalog import LINE_PATTERNS, RULE_PATTERNS, SHAPE_PATTERNS
 from chart import plot_coin, plot_findings, plot_history
 from blocks import find_block
 from history import (
-    HORIZON, coin_report, history_blocks, history_equal, history_fvg, history_lines,
+    HORIZON, coin_report, history_blocks, non_overlapping, history_equal, history_fvg, history_lines,
     history_shapes, history_structure, plural, summarize,
 )
 from market import FALLBACK_SYMBOLS, candles_to_df, fetch_many, get_candles
 from matcher import find_best_match_multi
 from notifier import tradingview_link
 from shape import photo_to_shape
+from similarity import SIMILAR_ENOUGH, best_match, reference_from_screenshot
+from confluence import caption_block, confluences, score as confluence_score, trend
 from smc import find_fvg
 from storage import DEFAULT_SETTINGS
 from texts import quality_text
@@ -53,18 +55,36 @@ def period_text(interval, candles):
 
 
 # --- детекторы «сейчас»: получили свечи, вернули находку или None ------------------------------
-def find_shape(df, shape):
-    """Паттерн «по форме» с картинки пользователя."""
-    start, score, window_len = find_best_match_multi(df["close"].tolist(), shape, WINDOWS, RECENT)
-    if score < MIN_SCORE:
+def find_shape(df, shapes):
+    """Паттерн «по форме»: сравниваем с КАЖДЫМ примером пользователя и берём лучший.
+    shapes — формы со всех его скринов (у одного паттерна их может быть несколько)."""
+    closes = df["close"].tolist()
+    best = None
+    for number, shape in enumerate(shapes, start=1):
+        start, score, window_len = find_best_match_multi(closes, shape, WINDOWS, RECENT)
+        if best is None or score > best["score"]:
+            best = {"score": score, "start": start, "window": window_len, "example": number}
+    if best is None or best["score"] < MIN_SCORE:
         return None
-    return {"score": score, "start": start, "window": window_len}
+    if len(shapes) == 1:
+        best.pop("example")
+    return best
 
 
-def find_lines(df, pattern_name, preferred_kind):
-    """Треугольник / клин / канал по линиям тренда, формирующийся прямо сейчас."""
-    found = find_line_pattern(df, FAMILY_BY_PATTERN[pattern_name], preferred_kind)
+def find_lines(df, pattern_name, preferred_kind, references=(), similar_only=False):
+    """Треугольник / клин / канал по линиям тренда, формирующийся прямо сейчас.
+    references — эталоны с рисунков пользователя: считаем «похоже на твой пример»;
+    similar_only — не присылать фигуры, похожие меньше чем на 60%."""
+    def compare(d, figure):
+        score, index = best_match(d, figure, references)
+        if index is not None and len(references) > 1:
+            figure["example"] = index + 1                   # «похоже на пример №2»
+        return score
+    compare = compare if references else None
+    found = find_line_pattern(df, FAMILY_BY_PATTERN[pattern_name], preferred_kind, similarity=compare)
     if found is None or found["score"] < MIN_SCORE:
+        return None
+    if similar_only and references and (found.get("similarity") or 0) < SIMILAR_ENOUGH:
         return None
     found["label"] = KIND_NAMES[found["kind"]]
     return found
@@ -94,12 +114,22 @@ def build_detectors(patterns, settings=None):
     for p in patterns:
         name = p["name"]
         if name in SHAPE_PATTERNS:
-            try:
-                shape = photo_to_shape(p["photo"])
-            except (ValueError, OSError):
+            if name in seen:
+                continue
+            seen.add(name)
+            # все примеры паттерна — один детектор: нет дублей «Двойное дно» в одном алерте
+            shapes = []
+            for q in patterns:
+                if q["name"] != name:
+                    continue
+                try:
+                    shapes.append(q["shape"] if q.get("shape") else photo_to_shape(q["photo"]))
+                except (ValueError, OSError):
+                    pass
+            if not shapes:
                 skipped.append(name)
                 continue
-            detectors.append((name, lambda df, s=shape: find_shape(df, s)))
+            detectors.append((name, lambda df, s=shapes: find_shape(df, s)))
             continue
 
         key = (name, p.get("kind"))
@@ -108,7 +138,13 @@ def build_detectors(patterns, settings=None):
         seen.add(key)
         if name in LINE_PATTERNS:
             kind = p.get("kind")
-            detectors.append((name, lambda df, n=name, k=kind: find_lines(df, n, k)))
+            # все рисунки этого паттерна и типа — эталоны «похоже на твой пример»
+            references = [ref for ref in (q.get("reference") or reference_from_screenshot(q["photo"])
+                                          for q in patterns
+                                          if q["name"] == name and q.get("kind") == kind) if ref]
+            similar_only = bool((settings or {}).get("similar_only"))
+            detectors.append((name, lambda df, n=name, k=kind, r=references:
+                              find_lines(df, n, k, r, similar_only)))
         elif name in RULE_PATTERNS:
             detectors.append((name, lambda df, n=name: find_rule(df, n, settings)))
         elif name not in skipped:
@@ -122,6 +158,8 @@ def describe_item(item):
     text = f"{item['name']} ({quality})" if quality else item["name"]
     if item.get("label"):
         text += f" — {item['label']}"
+    if item.get("fit") is not None:
+        text += f" · 🎯 тебе подходит {item['fit']:.0%}"
     return text
 
 
@@ -149,11 +187,14 @@ def draw_card(card, path):
 
 
 # --- сканирование «сейчас» -----------------------------------------------------------------------------
-def scan_user(patterns, intervals=DEFAULT_INTERVALS, fetch=None, symbols=None, settings=None):
+def scan_user(patterns, intervals=DEFAULT_INTERVALS, fetch=None, symbols=None, settings=None,
+              judge=None):
     """Все паттерны пользователя × монеты × таймфреймы. Свечи качаем один раз на монету и ТФ,
     сразу для многих монет параллельно.
     fetch — функция загрузки свечей (автоскан передаёт свою, с кэшем на всех пользователей).
     settings — настройки пользователя: какие FVG искать, только ли комбинации.
+    judge — «чему бот научился» по оценкам 👍/👎 (feedback.make_judge): отсеивает
+    то, что пользователю не нравится, и добавляет «подходит тебе N%».
     Возвращает (ВСЕ карточки — комбинации и лучшие первыми, пропущенные паттерны)."""
     fetch = fetch or get_candles
     symbols = symbols or FALLBACK_SYMBOLS
@@ -163,6 +204,7 @@ def scan_user(patterns, intervals=DEFAULT_INTERVALS, fetch=None, symbols=None, s
     cards = []
     if not detectors:
         return cards, skipped
+    charts = {}                                       # (монета, ТФ) → график: для трендов всех ТФ
 
     for interval in intervals:
         all_candles = fetch_many(symbols, interval, CANDLES, fetch)
@@ -171,18 +213,34 @@ def scan_user(patterns, intervals=DEFAULT_INTERVALS, fetch=None, symbols=None, s
             if not candles or len(candles) < max(WINDOWS):
                 continue                              # молодая монета — мало свечей для поиска
             df = candles_to_df(candles)
+            charts[(symbol, interval)] = df
             items = []
             for name, detect in detectors:
                 found = detect(df)
-                if found is not None:
-                    found["name"] = name
-                    items.append(found)
+                if found is None:
+                    continue
+                found["name"] = name
+                if judge is not None:
+                    keep, fit = judge(name, df, found)
+                    if not keep:
+                        continue
+                    if fit is not None:
+                        found["fit"] = fit
+                items.append(found)
             items = declutter_figures(items)            # треугольник и канал на одном месте — одна фигура
             if len(items) >= min_items:
                 cards.append({
                     "symbol": symbol, "interval": interval, "df": df, "items": items,
                     "history": False, "caption": alert_caption(symbol, interval, df, items),
                 })
+    # тренды ВСЕХ просканированных ТФ монеты — для «совпадения по таймфреймам»,
+    # даже на тех ТФ, где паттернов не нашлось (считаем только для монет с находками)
+    trends = {}
+    for card in cards:
+        symbol = card["symbol"]
+        if symbol not in trends:
+            trends[symbol] = {iv: trend(charts[(symbol, iv)]) for iv in intervals if (symbol, iv) in charts}
+        card["trends"] = trends[symbol]
     cards.sort(key=lambda c: (len(c["items"]), max(it["score"] for it in c["items"])), reverse=True)
     return cards, skipped
 
@@ -207,9 +265,11 @@ def cards_overview(coins, limit=OVERVIEW_LINES):
 
 # --- одна монета — одно сообщение со всеми таймфреймами ----------------------------------------------
 def _coin_rank(coin):
-    """Порядок монет: комбинация на одном ТФ > находки на нескольких ТФ > больше находок > оценка."""
+    """Порядок монет: совпадение по ТФ > комбинация на одном ТФ > находки на нескольких ТФ >
+    больше находок > оценка."""
     frames = coin["frames"]
-    return (max(len(f["items"]) for f in frames), len(frames),
+    return (confluence_score(coin.get("confluence", [])),
+            max(len(f["items"]) for f in frames), len(frames),
             sum(len(f["items"]) for f in frames),
             max(it["score"] for f in frames for it in f["items"]))
 
@@ -221,15 +281,24 @@ def coin_caption(coin):
     lowest = frames[0]["interval"]
     if coin["history"]:
         return "\n\n".join(f["caption"] for f in frames)
+    block = caption_block(coin.get("confluence", []))
     if len(frames) == 1:
-        return frames[0]["caption"]
+        caption = frames[0]["caption"]
+        if not block:
+            return caption
+        head, link = caption.rsplit("\n", 1)              # совпадения — перед ссылкой
+        return f"{head}\n\n{block}\n{link}"
     tfs = ", ".join(f["interval"].upper() for f in frames)
     combo = any(len(f["items"]) > 1 for f in frames)
-    lines = [f"{'🔥' if combo else '🔔'} {symbol}: находки на {len(frames)} таймфреймах ({tfs})"]
+    linked = confluence_score(coin.get("confluence", [])) > 0
+    icon = "🔗" if linked else "🔥" if combo else "🔔"
+    lines = [f"{icon} {symbol}: находки на {len(frames)} таймфреймах ({tfs})"]
     for f in frames:
         mark = "  🔥 комбинация" if len(f["items"]) > 1 else ""
         lines.append(f"\n⏱ {f['interval'].upper()}{mark}")
         lines += [f"• {describe_item(it)}" for it in f["items"]]
+    if block:
+        lines.append(f"\n{block}")
     lines.append(f"\n{tradingview_link(symbol, lowest)}")
     return "\n".join(lines)
 
@@ -245,6 +314,7 @@ def group_by_coin(cards):
     result = list(coins.values())
     for coin in result:
         coin["frames"].sort(key=lambda f: INTERVAL_HOURS[f["interval"]])
+        coin["confluence"] = [] if coin["history"] else confluences(coin)
         coin["caption"] = coin_caption(coin)
     result.sort(key=_coin_rank, reverse=True)
     return result
@@ -267,18 +337,23 @@ def build_history_jobs(patterns, settings=None):
     seen = set()
     for p in patterns:
         name = p["name"]
-        if name in SHAPE_PATTERNS:
-            try:
-                shape = photo_to_shape(p["photo"])
-            except (ValueError, OSError):
-                skipped.append(name)
-                continue
-            jobs.append((name, "shape", lambda df, s=shape: history_shapes(df, s, WINDOWS, MIN_SCORE)))
-            continue
         if name in seen:
             continue
         seen.add(name)
-        if name in LINE_PATTERNS:
+        if name in SHAPE_PATTERNS:
+            shapes = []
+            for q in patterns:                          # все примеры паттерна — одним заданием
+                if q["name"] == name:
+                    try:
+                        shapes.append(q["shape"] if q.get("shape") else photo_to_shape(q["photo"]))
+                    except (ValueError, OSError):
+                        pass
+            if not shapes:
+                skipped.append(name)
+                continue
+            jobs.append((name, "shape", lambda df, ss=shapes: non_overlapping(
+                [f for s in ss for f in history_shapes(df, s, WINDOWS, MIN_SCORE)])))
+        elif name in LINE_PATTERNS:
             family = FAMILY_BY_PATTERN[name]
             jobs.append((name, "lines", lambda df, f=family: history_lines(df, f, LINE_WINDOWS, MIN_SCORE)))
         elif name == "FVG":
@@ -419,6 +494,30 @@ def _past_items(jobs, df, current):
             if not duplicate:
                 past.append({**f, "name": name})
     return declutter_figures(past)
+
+
+def selected_markup(patterns, coin, chosen, settings=None):
+    """Разметка только выбранных находок (кнопка «🧩 Паттерны»).
+    chosen — [(таймфрейм, находка)]. Прошлые случаи берём только для тех же паттернов
+    и таймфреймов — на графике не будет ничего лишнего."""
+    names_by_tf = {}
+    for tf, item in chosen:
+        names_by_tf.setdefault(tf, set()).add(item["name"])
+    names = set().union(*names_by_tf.values()) if names_by_tf else set()
+    frames = [f for f in coin.get("frames", [coin]) if f["interval"] in names_by_tf]
+    groups = full_markup([p for p in patterns if p["name"] in names], {**coin, "frames": frames},
+                         list(names_by_tf), settings)
+    chosen_ids = {id(item) for _, item in chosen}
+    result = []
+    for df, items, history, tf in groups:
+        if tf not in names_by_tf:
+            continue
+        if history:
+            items = [it for it in items if it["name"] in names_by_tf[tf]]
+        else:
+            items = [it for it in items if id(it) in chosen_ids]
+        result.append((df, items, history, tf))
+    return result
 
 
 def full_markup(patterns, coin, intervals=None, settings=None):

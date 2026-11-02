@@ -164,26 +164,39 @@ def test_storage_safe_from_many_threads(tmp_path):
         storage.FILE = original
 
 
-def test_bot_card_ids_and_overview():
+def test_bot_results_list_and_viewer():
+    """Результаты: одно сообщение-список (заменяет «Сканирую…») + один просмотрщик первой монеты."""
     import bot
-    sent_cards, messages = [], []
-    original = bot.send_card, bot.send_message
+    sent_cards, messages, edits = [], [], []
+    original = bot.send_card, bot.send_message, bot.edit_message
     bot.send_card = lambda chat_id, card_id, coin: sent_cards.append(card_id)
-    bot.send_message = lambda text, chat_id, keyboard=None: messages.append((text, keyboard))
+    bot.send_message = lambda text, chat_id, keyboard=None, reply_to=None: messages.append((text, keyboard)) or 900
+    bot.edit_message = lambda chat_id, message_id, text, keyboard=None: edits.append((message_id, text, keyboard)) or True
     try:
         df = pd.DataFrame({"open_time": pd.date_range("2026-01-01", periods=3, freq="h", tz="UTC")})
         cards = [{"symbol": f"C{i}USDT", "interval": "1h", "df": df, "history": False, "caption": "",
                   "items": [{"name": "FVG", "score": 0.9 - i / 100, "kind": "bullish_fvg"}]} for i in range(20)]
         coins = scanner.group_by_coin(cards)
-        bot.send_cards(5, coins)
-        assert len(sent_cards) == bot.MAX_CARDS
-        text, keyboard = messages[-1]
+        bot.send_cards(5, coins, "🔍 Нашлось", edit_id=321)
+        assert len(sent_cards) == 1 and not messages              # список — правкой «Сканирую…»
+        message_id, text, keyboard = edits[-1]
+        assert message_id == 321 and text.startswith("🔍 Нашлось") and "1. 🔔 C0 — 1H: FVG ↑" in text
         buttons = [b for row in keyboard["inline_keyboard"] for b in row]
-        assert len(buttons) == 20 - bot.MAX_CARDS and buttons[0]["text"] == "C8"
-        card_id = int(buttons[0]["callback_data"].split(":")[1])
+        coins_buttons = [b for b in buttons if b["callback_data"].startswith("v:")]
+        assert len(coins_buttons) == bot.LIST_PAGE and coins_buttons[0]["text"] == "1. C0"
+        assert any(b["callback_data"].startswith("lp:") for b in buttons)          # страницы
+        assert buttons[-1]["callback_data"] == "home"
+        card_id = int(coins_buttons[8]["callback_data"].split(":")[1])
         assert bot.find_card(5, card_id)["symbol"] == "C8USDT"
+        sid = sent_cards[0]
+        text, keyboard = bot.results_view(5, sid, 1)                                # вторая страница
+        assert "16. 🔔 C15" in text and "стр. 2 / 2" in str(keyboard)
+        viewer = bot.card_keyboard(card_id, bot.find_card(5, card_id), 5)["inline_keyboard"]
+        assert [b["text"] for b in viewer[0]] == ["◀️", "9 / 20", "▶️"]
+        assert viewer[-1][0]["callback_data"] == f"list:{sid}" and viewer[-1][-1]["callback_data"] == "home"
+        assert bot.viewer_caption(bot.find_card(5, card_id), card_id).startswith("🔔 C8USDT · 9/20")
         bot.send_cards(5, coins[:1])                          # новое сканирование не ломает старые кнопки
         assert bot.find_card(5, card_id)["symbol"] == "C8USDT"
         assert bot.find_card(6, card_id) is None              # чужие находки не видны
     finally:
-        bot.send_card, bot.send_message = original
+        bot.send_card, bot.send_message, bot.edit_message = original

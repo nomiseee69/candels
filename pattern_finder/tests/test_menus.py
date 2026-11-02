@@ -1,0 +1,234 @@
+"""Интерфейс: меню и экраны листаются на месте, «📂 Мои паттерны» — все паттерны и галерея
+примеров, результаты — один список + один просмотрщик, и отовсюду можно вернуться в меню."""
+
+import pandas as pd
+
+import bot
+import storage
+from catalog import ALL_PATTERNS
+
+
+class Recorder:
+    """Подменяет отправку в Telegram и запоминает, что бот «отправил»."""
+
+    NAMES = ("send_message", "edit_message", "answer_callback", "send_document", "send_action",
+             "send_photo", "edit_photo", "delete_message", "edit_keyboard", "background")
+
+    def __init__(self):
+        self.sent, self.edited, self.docs, self.photos, self.deleted, self.keyboards = [], [], [], [], [], []
+        self.saved = {name: getattr(bot, name) for name in self.NAMES}
+        bot.send_message = lambda text, chat_id, keyboard=None, reply_to=None: self.sent.append((text, keyboard)) or 500
+        bot.edit_message = lambda chat_id, message_id, text, keyboard=None: self.edited.append((text, keyboard)) or True
+        bot.answer_callback = lambda *a: None
+        bot.send_action = lambda *a: None
+        bot.send_document = lambda path, caption, chat_id, filename, keyboard=None, reply_to=None: \
+            self.docs.append((caption, filename, keyboard, reply_to))
+        bot.send_photo = lambda path, caption, chat_id, keyboard=None: self.photos.append(("new", caption, keyboard)) or 600
+        bot.edit_photo = lambda chat_id, message_id, path, caption, keyboard=None: \
+            self.photos.append(("edit", caption, keyboard)) or True
+        bot.delete_message = lambda chat_id, message_id: self.deleted.append(message_id)
+        bot.edit_keyboard = lambda chat_id, message_id, keyboard: self.keyboards.append(keyboard)
+        bot.background = lambda func, *args: func(*args)          # в тестах — сразу, без потока
+
+    def restore(self):
+        for name, value in self.saved.items():
+            setattr(bot, name, value)
+
+
+def press(data, chat_id=5, message_id=77, photo=False):
+    message = {"chat": {"id": chat_id}, "message_id": message_id}
+    if photo:
+        message["photo"] = [{"file_id": "x"}]
+    bot.handle_callback({"id": "1", "data": data, "message": message})
+
+
+def buttons(keyboard):
+    return [b for row in keyboard["inline_keyboard"] for b in row]
+
+
+def datas(keyboard):
+    return [b.get("callback_data") for b in buttons(keyboard)]
+
+
+def use_storage(tmp_path):
+    original = storage.FILE
+    storage.FILE = str(tmp_path / "users.json")
+    return original
+
+
+def test_main_menu_is_compact():
+    names = [b["text"] for b in buttons(bot.menu_keyboard(1))]
+    assert not set(names) & set(ALL_PATTERNS)
+    assert "📂 Мои паттерны" in names and "🔍 Сканировать" in names and len(names) == 7
+
+
+def test_patterns_list_shows_all_and_pick_flow(tmp_path):
+    rec = Recorder()
+    original = use_storage(tmp_path)
+    try:
+        storage.add_pattern(5, "Канал", "a.png")
+        press("my")
+        text, keyboard = rec.edited[-1]
+        assert text.startswith("📂 Паттерны")
+        index = ALL_PATTERNS.index("Канал")
+        assert f"gal:{index}:0" in datas(keyboard)                       # сохранённый → галерея
+        picks = [d for d in datas(keyboard) if d.startswith("pick:")]
+        assert len(picks) == len(ALL_PATTERNS) - 1                      # остальные — добавить
+        assert "✅ Канал · 1" in [b["text"] for b in buttons(keyboard)]
+        assert datas(keyboard)[-1] == "menu"
+        press(f"pick:{ALL_PATTERNS.index('FVG')}")
+        text, keyboard = rec.edited[-1]
+        assert bot.waiting[5] == "FVG" and text.startswith("📷 Пришли скриншот паттерна «FVG»")
+        assert datas(keyboard) == ["my", "menu"]
+        press("my")                                                     # назад — к списку, ожидание снято
+        assert 5 not in bot.waiting and rec.edited[-1][0].startswith("📂 Паттерны")
+        press("menu")
+        assert rec.edited[-1][0].startswith("🤖 Pattern Finder")
+    finally:
+        storage.FILE = original
+        rec.restore()
+
+
+def test_gallery_browse_and_delete(tmp_path):
+    rec = Recorder()
+    original = use_storage(tmp_path)
+    try:
+        saved_dir, bot.PATTERNS_DIR = bot.PATTERNS_DIR, str(tmp_path)    # картинка «нет файла» — во временную папку
+        first = storage.add_pattern(5, "Канал", str(tmp_path / "a.png"), kind="channel_down")
+        second = storage.add_pattern(5, "Канал", str(tmp_path / "b.png"))
+        index = ALL_PATTERNS.index("Канал")
+        press(f"gal:{index}:0")                                         # из текстового списка
+        assert rec.deleted == [77]                                      # список убрали
+        kind, caption, keyboard = rec.photos[-1]
+        assert kind == "new" and caption.startswith("📂 Канал — пример 1 из 2")
+        assert "скрин: нисходящий канал" in caption
+        assert [b["text"] for b in keyboard["inline_keyboard"][0]] == ["◀️", "1 / 2", "▶️"]
+        assert f"gdel:{first}" in datas(keyboard) and f"pick:{index}" in datas(keyboard)
+        assert f"gall:{index}" in datas(keyboard) and datas(keyboard)[-2:] == ["my", "menu"]
+        press(f"gal:{index}:1", message_id=78, photo=True)              # ▶️ — на месте
+        kind, caption, _ = rec.photos[-1]
+        assert kind == "edit" and caption.startswith("📂 Канал — пример 2 из 2")
+        press(f"gdel:{second}", message_id=78, photo=True)             # удалили 2-й — показан 1-й
+        kind, caption, keyboard = rec.photos[-1]
+        assert kind == "edit" and caption.startswith("📂 Канал — пример 1 из 1")
+        assert "◀️" not in [b["text"] for b in buttons(keyboard)]
+        press(f"gall:{index}", message_id=78, photo=True)               # подтверждение — кнопками
+        assert datas(rec.keyboards[-1]) == [f"gyes:{index}", f"gal:{index}:0"]
+        press(f"gyes:{index}", message_id=78, photo=True)
+        assert storage.get_patterns(5) == [] and 78 in rec.deleted
+        assert rec.sent[-1][0].startswith("📂 У тебя пока нет паттернов")
+        press("menu", message_id=79, photo=True)                        # из галереи — меню вместо картинки
+        assert 79 in rec.deleted and rec.sent[-1][0].startswith("🤖 Pattern Finder")
+    finally:
+        bot.PATTERNS_DIR = saved_dir
+        storage.FILE = original
+        rec.restore()
+
+
+def test_settings_change_in_place(tmp_path):
+    rec = Recorder()
+    original = use_storage(tmp_path)
+    try:
+        press("settings")
+        assert rec.edited[-1][0].startswith("⚙️ Настройки") and not rec.sent
+        press("tf")
+        assert rec.edited[-1][0].startswith("⏱ На каких")
+        press("tf:1d")
+        assert "✅ 1D" in [b["text"] for b in buttons(rec.keyboards[-1])]
+        press("tf_done")
+        assert rec.edited[-1][0].startswith("⚙️ Настройки")
+        press("coins")
+        assert "settings" in datas(rec.edited[-1][1])
+        press("coins:100")
+        assert storage.get_coins(5) == 100 and rec.edited[-1][0].startswith("⚙️ Настройки")
+        press("auto")
+        assert rec.edited[-1][0].startswith("🤖 Pattern Finder") and "Автоскан включён" in rec.edited[-1][0]
+        assert not rec.sent                                              # ни одного нового сообщения
+    finally:
+        storage.FILE = original
+        rec.restore()
+
+
+def test_home_button_everywhere():
+    df = pd.DataFrame({"open_time": pd.date_range("2026-10-01", periods=60, freq="4h", tz="UTC"),
+                       "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0})
+    coin = {"symbol": "SOLUSDT", "history": False,
+            "frames": [{"interval": "4h", "df": df, "history": False,
+                        "items": [{"name": "FVG", "score": 0.9, "start": 50, "window": 3, "kind": "bullish_fvg",
+                                   "zone": (99.0, 100.0), "distance": 0.01}]}]}
+    assert "home" in datas(bot.markup_keyboard("SOLUSDT", ["4h"]))
+    assert "home" in datas(bot.card_keyboard(3, coin))
+    assert "home" in datas(bot.patterns_keyboard(5, 3, coin))
+    assert "home" in datas(bot.results_view(5, 999999)[1]) or "menu" in datas(bot.results_view(5, 999999)[1])
+    url = [b for b in buttons(bot.card_keyboard(3, coin)) if "url" in b]
+    assert url and "interval=240" in url[0]["url"]                      # TradingView прямо в просмотрщике
+    rec = Recorder()
+    try:
+        press("pinehelp")
+        assert datas(rec.sent[-1][1]) == ["hide", "home"]
+        press("find")
+        assert rec.edited[-1][0].startswith("🔎 Напиши тикер") and datas(rec.edited[-1][1]) == ["menu"]
+        press("home", message_id=90, photo=True)                         # под файлом/картинкой — новое меню
+        assert rec.sent[-1][0].startswith("🤖 Pattern Finder") and 90 not in rec.deleted
+        press("hide", message_id=91)
+        assert 91 in rec.deleted
+    finally:
+        rec.restore()
+
+
+def test_viewer_vote_marks_button_and_list_moves_down(tmp_path):
+    rec = Recorder()
+    original = use_storage(tmp_path)
+    try:
+        df = pd.DataFrame({"open_time": pd.date_range("2026-10-01", periods=60, freq="4h", tz="UTC"),
+                           "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0})
+        coins = [{"symbol": s, "history": False, "confluence": [], "caption": f"{s} подробно",
+                  "frames": [{"interval": "4h", "df": df, "history": False,
+                              "items": [{"name": "FVG", "score": 0.9, "start": 50, "window": 3,
+                                         "kind": "bullish_fvg", "zone": (99.0, 100.0), "distance": 0.01}]}]}
+                 for s in ("SOLUSDT", "WLDUSDT")]
+        drawn = []
+        saved_draw = bot.draw_coin
+        bot.draw_coin = lambda coin, path: drawn.append(coin["symbol"])
+        try:
+            bot.send_cards(5, coins, "🔍 Нашлось", edit_id=300)
+            assert rec.edited[-1][0].startswith("🔍 Нашлось")              # список — на месте «Сканирую…»
+            kind, caption, keyboard = rec.photos[-1]
+            assert kind == "new" and caption.startswith("🔔 SOLUSDT · 1/2")
+            sid = coins[0]["session"][0]
+            press(f"v:{coins[1]['session'][1]}", message_id=600, photo=True)    # ▶️
+            kind, caption, _ = rec.photos[-1]
+            assert kind == "edit" and caption.startswith("🔔 WLDUSDT · 2/2")
+            press(f"v:{sid}", message_id=300)                               # из списка — тот же просмотрщик
+            assert rec.photos[-1][0] == "edit" and drawn == ["SOLUSDT", "WLDUSDT", "SOLUSDT"]
+            press(f"vote:{sid}:1", message_id=600, photo=True)               # 👍 — отметка на кнопке
+            assert "✅ Подходит" in [b["text"] for b in buttons(rec.keyboards[-1])]
+            assert storage.get_feedback(5)[0]["vote"] == 1
+            press(f"det:{sid}", message_id=600, photo=True)
+            assert rec.sent[-1][0] == "SOLUSDT подробно" and datas(rec.sent[-1][1]) == ["hide", "home"]
+            press(f"list:{sid}", message_id=600, photo=True)                # список переезжает вниз
+            assert 300 in rec.deleted and 600 in rec.deleted
+            assert rec.sent[-1][0].startswith("🔍 Нашлось")
+        finally:
+            bot.draw_coin = saved_draw
+    finally:
+        storage.FILE = original
+        rec.restore()
+
+
+def test_markup_file_replies_to_card_with_links():
+    rec = Recorder()
+    try:
+        df = pd.DataFrame({"open_time": pd.date_range("2026-10-01", periods=60, freq="4h", tz="UTC"),
+                           "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0})
+        coin = {"symbol": "SOLUSDT", "frames": [{"interval": "4h"}]}
+        groups = [(df, [], True, "1h"), (df, [], True, "4h")]
+        bot.send_markup(5, coin, groups, "//@version=5", "SOLUSDT_patterns.pine.txt", 123)
+        caption, filename, keyboard, reply_to = rec.docs[-1]
+        assert reply_to == 123 and caption.startswith("📈 SOLUSDT — разметка для TradingView")
+        assert len(caption) <= bot.CAPTION_LIMIT
+        urls = [b["url"] for b in buttons(keyboard) if "url" in b]
+        assert len(urls) == 2 and "interval=240" in urls[1]
+        assert datas(keyboard)[-2:] == ["pinehelp", "home"]                 # после TradingView — в меню
+    finally:
+        rec.restore()

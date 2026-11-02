@@ -4,9 +4,13 @@
 import threading
 import time
 
-from scanner import alert_caption, group_by_coin, scan_user
+from texts import plural
+from confluence import score as confluence_score, trend
+from market import candles_to_df
+from scanner import CANDLES, alert_caption, group_by_coin, scan_user
 from market import get_candles, top_symbols
-from storage import add_sent, autoscan_users, get_sent
+from feedback import make_judge
+from storage import add_sent, autoscan_users, get_feedback, get_sent
 
 INTERVAL_SECONDS = {"1h": 3600, "4h": 14400, "12h": 43200, "1d": 86400, "1w": 604800}
 WEEK_OFFSET = 4 * 86400   # 01.01.1970 — четверг, а недельные свечи Binance начинаются в понедельник
@@ -76,6 +80,18 @@ def cached_fetch():
     return fetch
 
 
+def add_higher_trends(cards, intervals, fetch):
+    """Автоскан проверяет только ТФ, у которых закрылась свеча. Для «совпадения по ТФ»
+    докладываем тренды остальных ТФ пользователя (свечи берутся из общего кэша)."""
+    for card in cards:
+        trends = dict(card.get("trends") or {})
+        for interval in intervals:
+            if interval not in trends:
+                candles = fetch(card["symbol"], interval, CANDLES)
+                trends[interval] = trend(candles_to_df(candles)) if candles else None
+        card["trends"] = trends
+
+
 def run_autoscan(due, send_cards, send_message, now=None):
     """Проверяет таймфреймы due (у них только что закрылась свеча) для всех подписчиков.
     Находки одной монеты на разных ТФ приходят одним сообщением. Возвращает число монет."""
@@ -87,7 +103,9 @@ def run_autoscan(due, send_cards, send_message, now=None):
         mine = [i for i in due if i in intervals]
         if not mine:
             continue
-        cards, _ = scan_user(patterns, mine, fetch, top_symbols(coins), settings)
+        judge = make_judge(get_feedback(chat_id)) if settings.get("learn", True) else None
+        cards, _ = scan_user(patterns, mine, fetch, top_symbols(coins), settings, judge=judge)
+        add_higher_trends(cards, intervals, fetch)
         sent = get_sent(chat_id)
         new_cards, new_entries = [], []
         for card in cards:
@@ -100,9 +118,14 @@ def run_autoscan(due, send_cards, send_message, now=None):
                               "caption": alert_caption(card["symbol"], card["interval"], card["df"], items)})
             new_entries += [e for _, e in fresh]
         if new_cards:
-            send_message(f"🔔 Автоскан {', '.join(i.upper() for i in mine)}: новые находки", chat_id)
             coins_found = group_by_coin(new_cards)
-            send_cards(chat_id, coins_found)
+            if settings.get("confluence_only"):
+                coins_found = [c for c in coins_found if confluence_score(c["confluence"]) > 0]
+                if not coins_found:
+                    continue
+            title = (f"🔔 Автоскан {', '.join(i.upper() for i in mine)}: новые находки на "
+                     + plural(len(coins_found), "монете", "монетах", "монетах"))
+            send_cards(chat_id, coins_found, title)
             add_sent(chat_id, new_entries, now)
             total += len(coins_found)
     return total

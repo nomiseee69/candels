@@ -105,7 +105,8 @@ def test_pine_draws_blocks():
     blocks = [{**blk, "name": "Order Block"} for blk in all_blocks(df)]
     code = pine_script("X", "4h", [(df, blocks, True)])
     assert code.count("box.new(") == len(blocks)
-    assert 'text="OB"' in code and 'text="Breaker"' in code
+    assert 'text="Breaker"' in code                       # живой breaker у цены — с подписью
+    assert code.count('text=""') == len(blocks) - 1       # остальные — история, без подписей
     assert "border_style=line.style_dashed" in code       # breaker — пунктирная рамка
     assert "extend=extend.right" in code                  # действующий блок тянется вправо
 

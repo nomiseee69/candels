@@ -47,15 +47,21 @@ def save_users(users):
 
 
 @locked
-def add_pattern(chat_id, name, photo_path, note="", kind=None):
-    """Сохраняет паттерн и возвращает его id.
-    kind — тип фигуры с рисунка пользователя (например, "symmetric"), если линии нарисованы."""
+def add_pattern(chat_id, name, photo_path, note="", kind=None, reference=None, shape=None):
+    """Сохраняет пример паттерна и возвращает его id. Примеров одного паттерна может быть много.
+    kind — тип фигуры с рисунка пользователя (например, "symmetric"), если линии нарисованы;
+    reference / shape — эталон, снятый прямо с рынка (кнопка «💾 Сохранить как пример»)."""
     users = load_users()
     user = users.setdefault(str(chat_id), {"patterns": []})
     pattern_id = str(int(time.time() * 1000))
-    user["patterns"].append({
-        "id": pattern_id, "name": name, "photo": photo_path, "note": note, "kind": kind,
-    })
+    while any(p["id"] == pattern_id for p in user["patterns"]):   # два сохранения в одну миллисекунду
+        pattern_id = str(int(pattern_id) + 1)
+    entry = {"id": pattern_id, "name": name, "photo": photo_path, "note": note, "kind": kind}
+    if reference is not None:
+        entry["reference"] = reference
+    if shape is not None:
+        entry["shape"] = shape
+    user["patterns"].append(entry)
     save_users(users)
     return pattern_id
 
@@ -159,8 +165,11 @@ def set_coins(chat_id, count):
 
 
 # --- настройки поиска ------------------------------------------------------------------------------
-DEFAULT_SETTINGS = {"fvg": "significant", "combos_only": False}
-SETTING_VALUES = {"fvg": ["significant", "all"], "combos_only": [False, True]}
+DEFAULT_SETTINGS = {"fvg": "significant", "combos_only": False, "similar_only": False, "learn": True,
+                    "confluence_only": False}
+SETTING_VALUES = {"fvg": ["significant", "all"], "combos_only": [False, True],
+                  "similar_only": [False, True], "learn": [True, False],
+                  "confluence_only": [False, True]}
 
 
 def get_settings(chat_id):
@@ -179,3 +188,29 @@ def toggle_setting(chat_id, key):
     user["settings"] = settings
     save_users(users)
     return settings
+
+
+# --- оценки 👍 / 👎 -------------------------------------------------------------------------------
+FEEDBACK_MAX = 2000
+
+
+def get_feedback(chat_id):
+    return load_users().get(str(chat_id), {}).get("feedback", [])
+
+
+@locked
+def add_feedback(chat_id, record):
+    """Запоминает оценку. Повторная оценка той же находки заменяет прежнюю."""
+    users = load_users()
+    user = users.setdefault(str(chat_id), {"patterns": []})
+    feedback = [r for r in user.get("feedback", []) if r["key"] != record["key"]]
+    user["feedback"] = (feedback + [record])[-FEEDBACK_MAX:]
+    save_users(users)
+    return user["feedback"]
+
+
+@locked
+def clear_feedback(chat_id):
+    users = load_users()
+    users.setdefault(str(chat_id), {"patterns": []})["feedback"] = []
+    save_users(users)

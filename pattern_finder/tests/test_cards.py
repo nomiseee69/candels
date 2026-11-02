@@ -40,13 +40,13 @@ def test_pine_current_triangle_lines_end_at_apex():
     code = pine_script("BTCUSDT", "4h", [(df, items, False)])
     t10 = int(df["open_time"].iloc[10].timestamp() * 1000)
     assert code.startswith("//@version=5")
-    assert 'indicator("Pattern Finder v11 · BTCUSDT 4H", overlay=true' in code
+    assert 'indicator("Pattern Finder v18 · BTCUSDT 4H", overlay=true' in code
     assert f"line.new({t10}, 110," in code
     assert code.count("line.new(") == 2
     assert "extend.right" not in code                 # линии не уходят в бесконечность
     # вершина: 104 - 6/39*k = 98 + 8/39*k → k ≈ 16.7 свечи после конца, цена 104 - 2.57 = 101.43
-    assert code.count("101.4285714286") == 2         # обе линии сходятся в одной точке
-    assert '"СЕЙЧАС · Треугольник · 6 касаний"' in code and "color.blue" in code
+    assert code.count("101.4285714286") == 3         # обе линии и подпись — в одной точке
+    assert '"Треугольник · 6 касаний"' in code and "color.blue" in code
 
 
 def test_past_figures_are_marked_and_explained():
@@ -58,8 +58,10 @@ def test_past_figures_are_marked_and_explained():
             "zone": (100.0, 101.0), "filled_at": None}]
     groups = [(df, past, True), (df, now, False)]
     code = pine_script("BTCUSDT", "4h", groups)
-    assert '"был · Канал · 05.10.26"' in code                 # прошлый — с датой окончания
-    assert "color=color.new(color.red, 35), width=1" in code and "width=2" not in code
+    assert '"Канал 05.10"' in code                            # прошлый — с датой окончания
+    assert "color=color.new(color.red, 60), width=1" in code and "width=2" not in code
+    assert 'show_history = input.bool(false' in code          # история по умолчанию скрыта
+    assert "if show_figures and show_history" in code
     text = pine_help("BTCUSDT", "4h", groups)
     assert "Сейчас найдено: FVG" in text and "1 прошлый случай" in text
 
@@ -104,7 +106,7 @@ def test_pine_respects_object_limit():
     items = [{"name": "FVG", "score": 0.9, "start": i, "window": 2, "kind": "bullish_fvg",
               "zone": (100.0, 101.0), "filled_at": i + 1} for i in range(550)]
     code = pine_script("BTCUSDT", "1h", [(df, items, True)])
-    assert code.count("box.new(") == 450
+    assert code.count("box.new(") == 150                 # история урезана до 150 свежих объектов
 
 
 # --- отчёт по монете ---------------------------------------------------------------------------

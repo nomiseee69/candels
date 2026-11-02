@@ -234,10 +234,10 @@ def test_settings_toggle(tmp_path):
     original = storage.FILE
     storage.FILE = str(tmp_path / "users.json")
     try:
-        assert storage.get_settings(1) == {"fvg": "significant", "combos_only": False}
+        assert storage.get_settings(1) == {"fvg": "significant", "combos_only": False, "similar_only": False, "learn": True, "confluence_only": False}
         assert storage.toggle_setting(1, "fvg")["fvg"] == "all"
         assert storage.toggle_setting(1, "combos_only")["combos_only"] is True
         assert storage.toggle_setting(1, "fvg")["fvg"] == "significant"
-        assert storage.get_settings(1) == {"fvg": "significant", "combos_only": True}
+        assert storage.get_settings(1) == {"fvg": "significant", "combos_only": True, "similar_only": False, "learn": True, "confluence_only": False}
     finally:
         storage.FILE = original
