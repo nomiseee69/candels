@@ -93,11 +93,13 @@ def structure_events(df, window=SWING_WINDOW):
     return events
 
 
-def find_break(df, kind):
+def find_break(df, kind, choose=None):
     """Свежий BOS или CHoCH (kind = "bos" / "choch") на последних свечах, или None."""
     n = len(df)
     recent = [e for e in structure_events(df) if e["kind"] == kind and e["end"] >= n - RECENT_BREAK]
-    return recent[-1] if recent else None
+    if not recent:
+        return None
+    return max(recent, key=choose) if choose else recent[-1]
 
 
 # --- EQH / EQL ------------------------------------------------------------------------------------
@@ -168,7 +170,7 @@ def equal_levels(df, window=LIQUIDITY_WINDOW):
     return sorted(levels, key=lambda f: f["start"])
 
 
-def find_equal(df):
+def find_equal(df, choose=None):
     """Незабранная ликвидность для алерта: равные хаи/лои, которые сложились недавно
     или к которым цена подошла ближе 1%. Берём ближайший к цене уровень."""
     n = len(df)
@@ -179,4 +181,6 @@ def find_equal(df):
     ]
     if not candidates:
         return None
+    if choose:
+        return max(candidates, key=choose)
     return min(candidates, key=lambda f: f["distance"])

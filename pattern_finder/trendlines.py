@@ -34,6 +34,9 @@ KIND_NAMES = {
     "channel_up": "восходящий канал",
     "channel_down": "нисходящий канал",
     "channel_flat": "боковой канал",
+    # флаги и вымпелы (flags.py) — тоже фигуры из двух линий
+    "bullish_flag": "бычий флаг", "bearish_flag": "медвежий флаг",
+    "bullish_pennant": "бычий вымпел", "bearish_pennant": "медвежий вымпел",
 }
 
 

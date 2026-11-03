@@ -26,5 +26,9 @@ def quality_text(item):
             text += f", похоже на твой {_example(item)} {item['similarity']:.0%}"
         return text
     if "kind" not in item and "zone" not in item and "level" not in item:
+        if item.get("builtin"):
+            return f"похоже на эталон {item['score']:.0%}"
         return f"похоже на твой {_example(item)} {item['score']:.0%}"
+    if item.get("similarity") is not None:            # SMC: похожесть на отпечаток твоего примера
+        return f"похоже на твой {_example(item)} {item['similarity']:.0%}"
     return ""

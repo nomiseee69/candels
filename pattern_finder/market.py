@@ -50,12 +50,22 @@ def _get(path, params):
 
 
 def get_candles(symbol, interval, limit):
-    """Закрытые свечи (последняя, ещё не закрытая, отбрасывается)."""
-    # +1 — последняя свеча ещё не закрыта и будет отброшена; Binance отдаёт максимум 1000
+    """Закрытые свечи (последняя, ещё не закрытая, отбрасывается).
+    Binance отдаёт максимум 1000 свечей за запрос — больше качаем кусками в прошлое:
+    следующий запрос заканчивается (endTime) перед самой старой уже полученной свечой."""
+    # +1 — последняя свеча ещё не закрыта и будет отброшена
     data = _get("klines", {"symbol": symbol, "interval": interval, "limit": min(limit + 1, MAX_LIMIT)})
     if not data:
         return None
-    return data[:-1]
+    candles = data[:-1]
+    while len(candles) < limit and len(data) >= MAX_LIMIT:
+        need = min(limit - len(candles), MAX_LIMIT)
+        data = _get("klines", {"symbol": symbol, "interval": interval, "limit": need,
+                               "endTime": int(candles[0][0]) - 1})
+        if not data:
+            break                                          # дальше истории нет (молодая монета)
+        candles = data + candles
+    return candles
 
 
 def fetch_many(symbols, interval, limit, fetch=get_candles, workers=WORKERS):

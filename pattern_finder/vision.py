@@ -413,3 +413,142 @@ if __name__ == "__main__":
         print(p, a.mode, len(a.prices), "точек", "| ломаная" if a.chain else "")
         print("  ", describe_lines(a.lines))
         draw_debug(p, a, p.rsplit(".", 1)[0] + "_debug.png")
+
+
+# --- свечи со скриншота: open / high / low / close и объём ------------------------------------
+GREEN_HUE = (35, 95)          # оттенок зелёного в OpenCV (0..180)
+CANDLE_ZONE = 0.75            # свечи — выше 75% высоты картинки…
+VOLUME_ZONE = 0.7             # …объём — столбики, которые начинаются ниже 70% высоты
+BODY_SHARE = 0.6              # строка — тело свечи, если её закрашивают ≥ 60% столбцов свечи
+
+
+def _runs(rows):
+    """Непрерывные группы строк в столбце: [(верх, низ)]."""
+    if len(rows) == 0:
+        return []
+    breaks = np.where(np.diff(rows) > RUN_GAP)[0]
+    starts = np.concatenate([[0], breaks + 1])
+    ends = np.concatenate([breaks, [len(rows) - 1]])
+    return [(int(rows[s]), int(rows[e])) for s, e in zip(starts, ends)]
+
+
+def _columns(mask, hue, h):
+    """По каждому столбцу картинки: верх и низ свечи, цвет (+1 зелёный, −1 красный, 0 — не понять)
+    и высота столбика объёма (0 — нет)."""
+    cols = []
+    for x in range(mask.shape[1]):
+        runs = _runs(np.where(mask[:, x] > 0)[0])
+        candle = [r for r in runs if r[0] < CANDLE_ZONE * h]
+        volume = [r for r in runs if r[0] >= VOLUME_ZONE * h and r[1] >= 0.9 * h]
+        if not candle:
+            cols.append(None)
+            continue
+        top, bottom = max(candle, key=lambda r: r[1] - r[0])      # самая длинная группа — свеча, не значок
+        hues = hue[top:bottom + 1, x][mask[top:bottom + 1, x] > 0]
+        green = np.mean((hues >= GREEN_HUE[0]) & (hues <= GREEN_HUE[1])) if len(hues) else 0.5
+        color = 1 if green > 0.6 else -1 if green < 0.4 else 0
+        vol = max((r[1] - r[0] + 1 for r in volume if r[0] > bottom + RUN_GAP), default=0)
+        cols.append((top, bottom, color, vol))
+    return cols
+
+
+def _groups(cols):
+    """Соседние столбцы одного цвета без пропуска — одна свеча. Слишком широкие группы
+    (свечи вплотную) делим по типичной ширине свечи."""
+    groups, current = [], []
+    for x, c in enumerate(cols):
+        if c is None or (current and cols[current[-1]][2] != c[2]):
+            if current:
+                groups.append(current)
+            current = [x] if c is not None else []
+        else:
+            current.append(x)
+    if current:
+        groups.append(current)
+    if not groups:
+        return []
+    width = max(1, int(np.median([len(g) for g in groups])))
+    result = []
+    for g in groups:
+        parts = max(1, round(len(g) / width)) if len(g) > 2.5 * width else 1
+        result += [list(p) for p in np.array_split(g, parts)]
+    # по краям отбрасываем «острова» после большого пропуска и узкие обрывки
+    # (подписи шкалы цены, значки) — пока край не станет похож на ряд свечей
+    centers = [float(np.mean(g)) for g in result]
+    if len(result) > 10:
+        step = float(np.median(np.diff(centers)))
+        width = float(np.median([len(g) for g in result]))
+
+        with_volume = np.mean([any(cols[x][3] for x in g) for g in result]) > 0.8
+        # большой пропуск у края (последние / первые 8 свечей) — всё за ним не свечи
+        gaps = np.diff(centers)
+        far = [i for i in range(max(0, len(gaps) - 8), len(gaps)) if gaps[i] > 2.2 * step]
+        if far:
+            result, centers = result[:far[0] + 1], centers[:far[0] + 1]
+        gaps = np.diff(centers)
+        far = [i for i in range(min(8, len(gaps))) if gaps[i] > 2.2 * step]
+        if far:
+            result, centers = result[far[-1] + 1:], centers[far[-1] + 1:]
+
+        def stray(i, neighbour):
+            gap = abs(centers[i] - centers[neighbour])
+            no_volume = with_volume and not any(cols[x][3] for x in result[i])   # подпись, а не свеча
+            return no_volume or len(result[i]) < 0.5 * width or not 0.5 * step <= gap <= 2.2 * step
+
+        while len(result) > 10 and stray(-1, -2):
+            result, centers = result[:-1], centers[:-1]
+        while len(result) > 10 and stray(0, 1):
+            result, centers = result[1:], centers[1:]
+    return result
+
+
+def extract_candles(path):
+    """Свечи с картинки в пикселях (цена вверх = больше): DataFrame open/high/low/close
+    (+ volume, если внизу есть столбики объёма) или None, если свечей не видно.
+    Масштаб — пиксели, но для правил SMC это не важно: всё меряется в средних свечах (ATR)."""
+    img = load_image(path)
+    h, w = img.shape[:2]
+    fg = foreground_mask(img, detect_background(img))
+    mask = erase_dotted(erase_lines(fg, find_lines(fg)))
+    if candle_ratio(mask) < CANDLE_MODE_RATIO:
+        return None                                        # линейный график — свечей нет
+    colored = colored_mask(img) & mask
+    if np.count_nonzero(colored) > 0.5 * np.count_nonzero(mask):
+        mask = colored
+    hue = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, 0]
+    cols = _columns(mask, hue, h)
+    rows = []
+    for g in _groups(cols):
+        parts = [cols[x] for x in g]
+        top = min(p[0] for p in parts)
+        bottom = max(p[1] for p in parts)
+        cover = np.zeros(bottom - top + 1)
+        for p in parts:
+            cover[p[0] - top:p[1] - top + 1] += 1
+        if len(g) >= 3:
+            body = np.where(cover >= BODY_SHARE * len(g))[0]
+            body_top, body_bottom = (top + body[0], top + body[-1]) if len(body) else (top, bottom)
+        else:                                             # тонкая свеча: тело не отличить от тени
+            quarter = (bottom - top) / 4
+            body_top, body_bottom = top + quarter, bottom - quarter
+        color = np.sign(sum(p[2] for p in parts))
+        high, low = h - 1 - top, h - 1 - bottom
+        upper, lower = h - 1 - body_top, h - 1 - body_bottom
+        rows.append({"x": float(np.mean(g)), "high": float(high), "low": float(low),
+                     "open": float(lower if color >= 0 else upper),
+                     "close": float(upper if color >= 0 else lower),
+                     "color": int(color), "volume": float(max(p[3] for p in parts))})
+    if len(rows) < 20:
+        return None
+    df = pd.DataFrame(rows)
+    df = df[(df["high"] - df["low"]) < 0.6 * h].reset_index(drop=True)   # выбросы: столбы-метки на всю высоту
+    # у неизвестного цвета направление — по следующей свече
+    unknown = df["color"] == 0
+    nxt = df["close"].shift(-1).fillna(df["close"])
+    up = nxt > (df["high"] + df["low"]) / 2
+    df.loc[unknown & up, ["open", "close"]] = df.loc[unknown & up, ["low", "high"]].to_numpy()
+    df.loc[unknown & ~up, ["open", "close"]] = df.loc[unknown & ~up, ["high", "low"]].to_numpy()
+    if (df["volume"] > 0).mean() < 0.5:
+        df = df.drop(columns="volume")                     # объёма на скрине нет
+    df["open_time"] = pd.date_range("2000-01-01", periods=len(df), freq="h", tz="UTC")
+    return df[["open_time", "open", "high", "low", "close"] + (["volume"] if "volume" in df else [])]

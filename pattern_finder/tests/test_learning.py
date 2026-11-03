@@ -114,7 +114,7 @@ def test_bot_votes_and_saves_example(tmp_path):
         assert messages[-1][1]["inline_keyboard"][0][0]["callback_data"] == "ex:1:0"
         bot.vote_card(7, 2, -1)                                  # несколько — меню оценки
         rows = messages[-1][1]["inline_keyboard"]
-        assert len(rows) == 3 and rows[0][-1]["text"] == "💾" and len(rows[1]) == 2   # у FVG нет 💾
+        assert len(rows) == 3 and rows[0][-1]["text"] == "💾" and rows[1][-1]["text"] == "💾"   # FVG — отпечатком
         assert rows[-1][-1]["callback_data"] == "home"                     # выход в меню
         bot.rate_item(7, 2, 1, -1, 100)
         assert edits[-1]["inline_keyboard"][1][1]["text"] == "❌"

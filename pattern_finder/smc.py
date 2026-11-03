@@ -140,7 +140,7 @@ def find_all_fvg(df, lookback=LOOKBACK, include_filled=False, significant_only=F
     return sorted(found, key=lambda f: f["start"], reverse=True)
 
 
-def find_fvg(df, significant_only=False):
+def find_fvg(df, significant_only=False, choose=None):
     """Лучший незакрытый FVG для алерта (или None):
     свежий (последние 30 свечей) или старый (до 150 свечей), к которому подошла цена.
     Выше оценка — крупнее относительно ATR, значимый и ближе к текущей цене."""
@@ -151,7 +151,8 @@ def find_fvg(df, significant_only=False):
     ]
     if not candidates:
         return None
-    best = max(candidates, key=lambda f: f["score"] - f["distance"])
+    # choose — оценка «похоже на твой пример» (fingerprint): из подходящих берём самый похожий
+    best = max(candidates, key=choose or (lambda f: f["score"] - f["distance"]))
     if best["start"] < n - LOOKBACK - 2:
         best["label"] = "старый " + best["label"]
     return best

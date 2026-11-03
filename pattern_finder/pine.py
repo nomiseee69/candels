@@ -142,7 +142,25 @@ def draw_item(df, item, mode, tag="", width=1):
     now = mode == "now"
     color = "color.green" if _bullish(item) else "color.red"
 
-    if "upper" in item:                                          # треугольник, клин, канал
+    if item.get("kind") == "range":                              # боковик: коробка + POC
+        bottom, top = item["box"]
+        last = min(item.get("end", item["start"] + item["window"] - 1), len(df) - 1)
+        alive = now and not item.get("breakout")
+        right = len(df) - 1 if alive else last
+        out.append(_box(df, item["start"], top, right, bottom, "color.gray", 88 if mode != "past" else 94,
+                        text=f"{tag}Range" if mode != "past" else "",
+                        extend="extend.right" if alive else "extend.none"))
+        if item.get("poc") is not None and mode != "past":
+            out.append(_line(df, item["start"], item["poc"], right, item["poc"], "color.orange", width,
+                             style="line.style_dashed"))
+            out.append(_label(df, right, item["poc"], "POC", "color.orange", size="size.tiny"))
+        return out
+
+    if "upper" in item:                                          # треугольник, клин, канал, флаг
+        if item.get("pole"):                                     # флагшток
+            x0, y0, x1, y1 = item["pole"]
+            out.append(_line(df, x0, y0, x1, y1, "color.purple" if now else "color.new(color.purple, 60)",
+                             width + 1 if now else 1))
         end = _line_end(item) if now else item["upper"][2]
         for key, side in (("upper", "color.red"), ("lower", "color.green")):
             line = item[key]

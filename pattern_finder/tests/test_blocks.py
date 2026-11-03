@@ -89,14 +89,28 @@ def with_times(df):
 def test_scanner_alerts_order_block_retest():
     import scanner
     df = with_times(path(BULLISH_OB))
-    raw = [[int(t.timestamp() * 1000), o, h, lo, c, 1.0] for t, o, h, lo, c in
-           zip(df["open_time"], df["open"], df["high"], df["low"], df["close"])]
-    raw = [raw[0]] * (130 - len(raw)) + raw                # минимум свечей для поиска
-    cards, skipped = scanner.scan_user([{"name": "Order Block"}, {"name": "Breaker Block"}],
-                                       ["4h"], lambda s, i, n: raw, ["AAAUSDT"])
+    ob_candle = by_kind(all_blocks(df), "bullish_ob")[-1]["start"]
+    pad = 130 - len(df)                                    # минимум свечей для поиска
+
+    def candles(spike):
+        volumes = [3.0 if spike and i == ob_candle else 1.0 for i in range(len(df))]
+        raw = [[int(t.timestamp() * 1000), o, h, lo, c, v] for t, o, h, lo, c, v in
+               zip(df["open_time"], df["open"], df["high"], df["low"], df["close"], volumes)]
+        return [raw[0]] * pad + raw
+
+    patterns = [{"name": "Order Block"}, {"name": "Breaker Block"}]
+    # объём на свече блока обычный — по умолчанию такой OB не присылаем
+    cards, _ = scanner.scan_user(patterns, ["4h"], lambda s, i, n: candles(False), ["AAAUSDT"])
+    assert not any(it["name"] == "Order Block" for c in cards for it in c["items"])
+    cards, _ = scanner.scan_user(patterns, ["4h"], lambda s, i, n: candles(False), ["AAAUSDT"],
+                                 settings={"ob_volume": False})
+    assert any(it["name"] == "Order Block" for c in cards for it in c["items"])
+    # объём ×3 на свече блока — присылаем, в описании «объём ×3.0»
+    cards, skipped = scanner.scan_user(patterns, ["4h"], lambda s, i, n: candles(True), ["AAAUSDT"])
     assert skipped == [] and len(cards) == 1
     item = cards[0]["items"][0]
-    assert item["name"] == "Order Block" and "бычий OB" in item["label"]
+    assert item["name"] == "Order Block" and "бычий OB" in item["label"] and "объём ×3.0" in item["label"]
+    assert item["volume_high"] is True
 
 
 def test_pine_draws_blocks():

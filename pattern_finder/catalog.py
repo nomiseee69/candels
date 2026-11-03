@@ -18,9 +18,13 @@ SHAPE_PATTERNS = ["Двойное дно", "Двойная вершина", "Г�
 # ищутся по линиям тренда через экстремумы (trendlines)
 LINE_PATTERNS = ["Треугольник", "Клин", "Канал"]
 
-# ищутся по правилам на свечах (smc)
+# флагшток + короткий канал (флаг) или маленький треугольник (вымпел) — flags.py
+FLAG_PATTERNS = ["Флаг", "Вымпел"]
+FLAG_SHAPE = {"Флаг": "flag", "Вымпел": "pennant"}
+
+# ищутся по правилам на свечах (smc, structure, blocks, ranges)
 RULE_PATTERNS = [
-    "FVG", "BOS", "CHoCH", "EQH / EQL", "Order Block", "Breaker Block", "Mitigation Block",
+    "FVG", "BOS", "CHoCH", "EQH / EQL", "Order Block", "Breaker Block", "Mitigation Block", "Range",
 ]
 
-SEARCHABLE = SHAPE_PATTERNS + LINE_PATTERNS + RULE_PATTERNS
+SEARCHABLE = SHAPE_PATTERNS + LINE_PATTERNS + FLAG_PATTERNS + RULE_PATTERNS

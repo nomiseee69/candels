@@ -59,7 +59,7 @@ def use_storage(tmp_path):
 def test_main_menu_is_compact():
     names = [b["text"] for b in buttons(bot.menu_keyboard(1))]
     assert not set(names) & set(ALL_PATTERNS)
-    assert "📂 Мои паттерны" in names and "🔍 Сканировать" in names and len(names) == 7
+    assert "📂 Мои паттерны" in names and "🔍 Сканировать" in names and "❓ Помощь" in names and len(names) == 8
 
 
 def test_patterns_list_shows_all_and_pick_flow(tmp_path):
@@ -76,7 +76,13 @@ def test_patterns_list_shows_all_and_pick_flow(tmp_path):
         assert len(picks) == len(ALL_PATTERNS) - 1                      # остальные — добавить
         assert "✅ Канал · 1" in [b["text"] for b in buttons(keyboard)]
         assert datas(keyboard)[-1] == "menu"
-        press(f"pick:{ALL_PATTERNS.index('FVG')}")
+        fvg = ALL_PATTERNS.index("FVG")
+        press(f"pick:{fvg}")                                            # ➕ — объяснение и действия
+        text, keyboard = rec.edited[-1]
+        assert text.startswith("🧩 FVG") and "Как ищу:" in text and 5 not in bot.waiting
+        assert "Пришли скриншот своего примера" in text
+        assert datas(keyboard) == [f"shot:{fvg}", f"demo:{fvg}", f"on:{fvg}", "my", "menu"]   # свой пример — первым
+        press(f"shot:{fvg}")
         text, keyboard = rec.edited[-1]
         assert bot.waiting[5] == "FVG" and text.startswith("📷 Пришли скриншот паттерна «FVG»")
         assert datas(keyboard) == ["my", "menu"]
@@ -103,7 +109,8 @@ def test_gallery_browse_and_delete(tmp_path):
         assert kind == "new" and caption.startswith("📂 Канал — пример 1 из 2")
         assert "скрин: нисходящий канал" in caption
         assert [b["text"] for b in keyboard["inline_keyboard"][0]] == ["◀️", "1 / 2", "▶️"]
-        assert f"gdel:{first}" in datas(keyboard) and f"pick:{index}" in datas(keyboard)
+        assert f"gdel:{first}" in datas(keyboard) and f"shot:{index}" in datas(keyboard)
+        assert f"demo:{index}" in datas(keyboard) and "Как ищу:" in caption
         assert f"gall:{index}" in datas(keyboard) and datas(keyboard)[-2:] == ["my", "menu"]
         press(f"gal:{index}:1", message_id=78, photo=True)              # ▶️ — на месте
         kind, caption, _ = rec.photos[-1]
@@ -116,7 +123,7 @@ def test_gallery_browse_and_delete(tmp_path):
         assert datas(rec.keyboards[-1]) == [f"gyes:{index}", f"gal:{index}:0"]
         press(f"gyes:{index}", message_id=78, photo=True)
         assert storage.get_patterns(5) == [] and 78 in rec.deleted
-        assert rec.sent[-1][0].startswith("📂 У тебя пока нет паттернов")
+        assert rec.sent[-1][0].startswith("📂 Выбери паттерн и пришли скриншот своего примера")
         press("menu", message_id=79, photo=True)                        # из галереи — меню вместо картинки
         assert 79 in rec.deleted and rec.sent[-1][0].startswith("🤖 Pattern Finder")
     finally:
@@ -231,4 +238,105 @@ def test_markup_file_replies_to_card_with_links():
         assert len(urls) == 2 and "interval=240" in urls[1]
         assert datas(keyboard)[-2:] == ["pinehelp", "home"]                 # после TradingView — в меню
     finally:
+        rec.restore()
+
+
+def test_enable_without_screenshot(tmp_path):
+    """«✅ Включить поиск» без скрина: правила (FVG) и встроенный эталон (Двойное дно)."""
+    import scanner
+    rec = Recorder()
+    original = use_storage(tmp_path)
+    saved_dir, bot.PATTERNS_DIR = bot.PATTERNS_DIR, str(tmp_path)
+    try:
+        fvg, double = ALL_PATTERNS.index("FVG"), ALL_PATTERNS.index("Двойное дно")
+        press(f"on:{fvg}")
+        assert rec.edited[-1][0].startswith("✅ Ищу «FVG»")
+        press(f"on:{fvg}")                                              # второй раз — без дубля
+        press(f"on:{double}")
+        patterns = storage.get_patterns(5)
+        assert [p["name"] for p in patterns] == ["FVG", "Двойное дно"]
+        assert all(p["builtin"] and p["photo"] is None for p in patterns)
+        assert len(patterns[1]["shape"]) == 50                          # эталон «W»
+        detectors, skipped = scanner.build_detectors(patterns)
+        assert skipped == [] and [name for name, _ in detectors] == ["FVG", "Двойное дно"]
+        press(f"pick:{fvg}")
+        assert "✅ Ищу. Твоих примеров: 1" in rec.edited[-1][0] and f"on:{fvg}" not in datas(rec.edited[-1][1])
+        press(f"gal:{double}:0")                                        # в галерее — карточка эталона
+        kind, caption, _ = rec.photos[-1]
+        assert "без скриншота — встроенный эталон" in caption
+        assert (tmp_path / f"_card_{double}.png").exists()
+    finally:
+        bot.PATTERNS_DIR = saved_dir
+        storage.FILE = original
+        rec.restore()
+
+
+def test_welcome_for_new_user_and_commands(tmp_path):
+    rec = Recorder()
+    original = use_storage(tmp_path)
+    saved = bot.start_job, bot.find_coin
+    jobs = []
+    bot.start_job = lambda chat_id, func, *args: jobs.append(func.__name__)
+    bot.find_coin = lambda chat_id, query: jobs.append(("find", query))
+    try:
+        bot.handle_message({"chat": {"id": 9}, "text": "привет"})       # первое сообщение — приветствие
+        assert rec.sent[0][0].startswith("👋 Привет! Я Pattern Finder") and "/scan" in rec.sent[0][0]
+        assert rec.sent[-1][0].startswith("🤖 Pattern Finder")           # и меню
+        count = len(rec.sent)
+        bot.handle_message({"chat": {"id": 9}, "text": "привет"})       # второй раз — только меню
+        assert len(rec.sent) == count + 1
+        bot.handle_message({"chat": {"id": 9}, "text": "/scan"})
+        bot.handle_message({"chat": {"id": 9}, "text": "/find sol"})
+        assert jobs == ["run_scan", ("find", "sol")]
+        bot.handle_message({"chat": {"id": 9}, "text": "/help"})
+        assert rec.sent[-1][0].startswith("👋 Привет!")
+        bot.handle_message({"chat": {"id": 9}, "text": "/patterns"})
+        assert rec.sent[-1][0].startswith("📂")
+        press("help", chat_id=9)
+        assert rec.edited[-1][0].startswith("👋 Привет!")
+    finally:
+        bot.start_job, bot.find_coin = saved
+        storage.FILE = original
+        rec.restore()
+
+
+def test_demo_from_market_and_save(tmp_path):
+    """«👀 Пример с рынка»: бот находит реальный случай, рисует свечи, можно сохранить в примеры."""
+    import numpy as np
+    rec = Recorder()
+    original = use_storage(tmp_path)
+    saved = bot.PATTERNS_DIR, bot.top_symbols, bot.fetch_many, bot.start_job
+    bot.PATTERNS_DIR = str(tmp_path)
+    rng = np.random.default_rng(3)
+    t0 = 1_780_000_000_000
+
+    def candles(symbol, interval, limit):
+        closes = 100 + np.cumsum(rng.normal(0, 1, 400))
+        return [[t0 + i * 14_400_000, c - 0.3, c + 1, c - 1, c, 1 + (i % 7)] for i, c in enumerate(closes)]
+
+    bot.top_symbols = lambda n: ["AAAUSDT", "BBBUSDT"]
+    bot.fetch_many = lambda symbols, interval, limit, fetch: {s: candles(s, interval, limit) for s in symbols}
+    bot.start_job = lambda chat_id, func, *args: func(chat_id, *args)
+    bot.demo_cache.clear()
+    try:
+        index = ALL_PATTERNS.index("BOS")
+        press(f"demo:{index}")
+        kind, caption, keyboard = rec.photos[-1]
+        assert kind == "new" and caption.startswith("👀 BOS — пример с рынка (1/")
+        assert "⭐" in caption and f"on:{index}" in datas(keyboard)
+        assert any("url" in b for b in buttons(keyboard))
+        press(f"demo:{index}:1", message_id=80, photo=True)            # 🔄 — на месте
+        assert rec.photos[-1][0] == "edit" and "(2/" in rec.photos[-1][1]
+        channel = ALL_PATTERNS.index("Канал")
+        bot.demo_shown[(5, channel)] = None
+        lines = bot.demo_occurrences("Канал")
+        if lines:                                                       # у фигуры — «💾 В мои примеры»
+            press(f"demo:{channel}")
+            assert f"dsave:{channel}" in datas(rec.photos[-1][2])
+            press(f"dsave:{channel}")
+            saved_examples = storage.get_patterns(5)
+            assert saved_examples[-1]["name"] == "Канал" and saved_examples[-1]["reference"]
+    finally:
+        bot.PATTERNS_DIR, bot.top_symbols, bot.fetch_many, bot.start_job = saved
+        storage.FILE = original
         rec.restore()

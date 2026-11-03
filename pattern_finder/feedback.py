@@ -40,6 +40,7 @@ FEATURES = {
     "significant": ("значимый", "bool"),
     "imbalance": ("с FVG внутри", "bool"),
     "tested": ("цена уже возвращалась", "bool"),
+    "volume_ratio": ("объём блока, × среднего", "{:.1f}"),
 }
 
 
@@ -73,8 +74,17 @@ def features(df, item):
             f["imbalance"] = int(bool(item["imbalance"]))
         if "touched_at" in item:
             f["tested"] = int(item["touched_at"] is not None)
+        if item.get("volume_ratio") is not None:
+            f["volume_ratio"] = item["volume_ratio"]
     elif item.get("kind") in ("eqh", "eql"):
         f["distance_pct"] = item.get("distance", 0) * 100
+    elif item.get("kind") == "range":                                # боковик
+        bottom, top = item["box"]
+        f.update(touches=item.get("touches"), length=item.get("window"),
+                 height_pct=(top - bottom) / price * 100 if price else None,
+                 distance_pct=item.get("distance", 0) * 100)
+    if item.get("similarity") is not None:
+        f["similarity"] = item["similarity"]
     direction = _direction(item)
     if direction is not None:
         events = structure_events(df)

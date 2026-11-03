@@ -14,30 +14,34 @@ from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
-from catalog import ALL_PATTERNS, RULE_PATTERNS, SEARCHABLE, SMC_PATTERNS, TA_PATTERNS
+from catalog import ALL_PATTERNS, RULE_PATTERNS, SEARCHABLE, SHAPE_PATTERNS, SMC_PATTERNS, TA_PATTERNS
 from notifier import (
     API, TOKEN, TV_INTERVALS, answer_callback, delete_message, edit_keyboard, edit_message, edit_photo,
-    send_action, send_document, send_message, send_photo, tradingview_link,
+    send_action, send_document, send_message, send_photo, set_commands, tradingview_link,
 )
 from autoscan import Schedule, run_autoscan
 from pine import pine_help, pine_script
 from market import top_symbols
 from scanner import (
-    ALL_INTERVALS, COIN_OPTIONS, draw_coin, full_markup,
+    ALL_INTERVALS, CANDLES, COIN_OPTIONS, build_history_jobs, draw_coin, full_markup,
     group_by_coin, history_user, scan_user, selected_markup,
 )
 from texts import quality_text
 from storage import (
-    add_feedback, add_pattern, clear_feedback, delete_pattern, get_autoscan, get_coins,
+    add_feedback, add_pattern, clear_feedback, delete_pattern, first_visit, get_autoscan, get_coins,
     get_feedback, get_intervals, get_patterns, get_settings, set_coins, toggle_autoscan,
     toggle_interval, toggle_setting,
 )
-from chart import plot_findings
+from chart import plot_example, plot_findings
+from guide import COMMANDS, DEMO_LEGEND, PATTERN_INFO, WELCOME
+from templates import template_shape
 from feedback import MIN_VOTES_FIT, features, learn, make_judge, rule_text
 from feedback import summary as learning_summary
 from similarity import example_from_item
+from fingerprint import FAMILY, describe as describe_fingerprint, kind_text, make_fingerprint, screenshot_fingerprint
+from vision import extract_candles
 from confluence import direction, score as confluence_score
-from market import get_candles
+from market import candles_to_df, fetch_many, get_candles
 from texts import plural
 from version import VERSION
 from trendlines import KIND_NAMES, kind_from_drawing
@@ -139,6 +143,17 @@ def remove_file(path):
         os.remove(path)
 
 
+def market_example(df, item):
+    """Находка с рынка → новый пример паттерна (аргументы для add_pattern) или None.
+    Фигуры — эталон формы/линий, SMC, Range, флаги — отпечаток (fingerprint.py)."""
+    example = example_from_item(df, item)
+    if example is not None:
+        return {"kind": example.get("kind"), "reference": example.get("reference"), "shape": example.get("shape")}
+    if item.get("name") in FAMILY:
+        return {"kind": item.get("kind"), "fingerprint": make_fingerprint(item["name"], df, item)}
+    return None
+
+
 # --- общие кнопки и экраны ------------------------------------------------------------------
 HOME = {"text": "🏠 Меню", "callback_data": "home"}        # новое меню внизу чата (старое сообщение остаётся)
 TO_MENU = {"text": "🏠 Меню", "callback_data": "menu"}     # меню на месте этого сообщения
@@ -190,7 +205,8 @@ def menu_keyboard(chat_id=None):
          {"text": "📊 История", "callback_data": "history"}],
         [{"text": "📚 Обучение", "callback_data": "learn"},
          {"text": "⚙️ Настройки", "callback_data": "settings"}],
-        [{"text": "🔔 Автоскан: вкл" if auto_on else "🔕 Автоскан: выкл", "callback_data": "auto"}],
+        [{"text": "🔔 Автоскан: вкл" if auto_on else "🔕 Автоскан: выкл", "callback_data": "auto"},
+         {"text": "❓ Помощь", "callback_data": "help"}],
     ]}
 
 
@@ -228,10 +244,12 @@ def my_patterns_view(chat_id):
             + _grid([button(n) for n in SMC_PATTERNS])
             + [[TO_MENU]])
     if counts:
-        text = ("📂 Паттерны\n✅ — твои (цифра — сколько примеров): нажми, чтобы посмотреть картинки, "
-                "добавить или удалить.\n➕ — ещё не добавлен: нажми и пришли скриншот-пример.")
+        text = ("📂 Паттерны\n✅ — ищу (цифра — сколько твоих примеров): нажми, чтобы посмотреть, "
+                "добавить или удалить.\n➕ — ещё не ищу: нажми и пришли свой пример — буду искать "
+                "похожие на него.")
     else:
-        text = "📂 У тебя пока нет паттернов. Нажми на любой ➕ и пришли скриншот-пример."
+        text = ("📂 Выбери паттерн и пришли скриншот своего примера — я буду искать на рынке "
+                "похожие именно на него. Нажми на любой ➕.")
     return text, {"inline_keyboard": rows}
 
 
@@ -242,9 +260,15 @@ def examples_of(chat_id, index):
 def example_title(p):
     """Короткое описание примера: откуда он и что на нём."""
     if p.get("note", "").startswith("с рынка"):
+        if p.get("fingerprint"):
+            return f"{p['note']}\n{describe_fingerprint(p['fingerprint'])}"
         return p["note"]
+    if p.get("fingerprint"):
+        return f"скрин: {describe_fingerprint(p['fingerprint'])}"
+    if p.get("builtin"):
+        return "без скриншота — " + ("встроенный эталон" if p["name"] in SHAPE_PATTERNS else "по правилам")
     if p.get("kind"):
-        return f"скрин: {KIND_NAMES[p['kind']]}"
+        return f"скрин: {KIND_NAMES.get(p['kind'], p['kind'])}"
     return "скрин"
 
 
@@ -257,30 +281,40 @@ def gallery_view(chat_id, index, pos):
     n = len(examples)
     pos = max(0, min(pos, n - 1))
     example = examples[pos]
-    caption = f"📂 {name} — пример {pos + 1} из {n}\n{example_title(example)}\n\n"
-    caption += RULE_HELP.get(name, "Чем больше разных примеров, тем точнее поиск: "
-                                   "бот сравнивает каждую находку со всеми.")
+    caption = f"📂 {name} — пример {pos + 1} из {n}\n{example_title(example)}\n\nКак ищу: {PATTERN_INFO[name]}"
+    caption = caption[:CAPTION_LIMIT]
     rows = []
     if n > 1:
         rows.append([{"text": "◀️", "callback_data": f"gal:{index}:{(pos - 1) % n}"},
                      {"text": f"{pos + 1} / {n}", "callback_data": "noop"},
                      {"text": "▶️", "callback_data": f"gal:{index}:{(pos + 1) % n}"}])
     rows.append([{"text": "🗑 Удалить этот пример", "callback_data": f"gdel:{example['id']}"},
-                 {"text": "➕ Добавить пример", "callback_data": f"pick:{index}"}])
-    rows.append([{"text": f"🗑 Удалить «{name}» целиком", "callback_data": f"gall:{index}"}])
+                 {"text": "📷 Добавить скрин", "callback_data": f"shot:{index}"}])
+    rows.append([{"text": "👀 Пример с рынка", "callback_data": f"demo:{index}"},
+                 {"text": "🗑 Удалить целиком", "callback_data": f"gall:{index}"}])
     rows.append([{"text": "⬅️ К паттернам", "callback_data": "my"}, TO_MENU])
-    return example["photo"], caption, {"inline_keyboard": rows}
+    return example.get("photo"), caption, {"inline_keyboard": rows}
 
 
-def placeholder_image():
-    """Картинка «файла нет» — если пример удалили с диска вручную."""
-    path = os.path.join(PATTERNS_DIR, "_no_image.png")
+def placeholder_image(name=None):
+    """Картинка для примера без файла: у включённого «без скриншота» — карточка паттерна
+    (для фигур — встроенный эталон), у удалённого с диска файла — «картинки нет»."""
+    index = ALL_PATTERNS.index(name) if name in ALL_PATTERNS else "none"
+    path = os.path.join(PATTERNS_DIR, f"_card_{index}.png")
     if not os.path.exists(path):
         import matplotlib.pyplot as plt
         with chart_lock:
-            fig, ax = plt.subplots(figsize=(4, 2.5))
-            ax.text(0.5, 0.5, "картинки нет\n(файл удалён)", ha="center", va="center", fontsize=14)
-            ax.axis("off")
+            fig, ax = plt.subplots(figsize=(5, 3))
+            shape = template_shape(name) if name else None
+            if shape:
+                ax.plot(shape, color="royalblue", linewidth=3)
+                ax.set_title(f"{name}: встроенный эталон", fontsize=13)
+                ax.set_xticks([])
+                ax.set_yticks([])
+            else:
+                text = f"{name}\nищу по правилам —\nскриншот не нужен" if name else "картинки нет\n(файл удалён)"
+                ax.text(0.5, 0.5, text, ha="center", va="center", fontsize=14)
+                ax.axis("off")
             fig.savefig(path)
             plt.close(fig)
     return path
@@ -294,7 +328,7 @@ def show_gallery(chat_id, index, pos, message_id=None, media=False):
         show_view(chat_id, message_id, my_patterns_view(chat_id), media)
         return
     photo, caption, keyboard = view
-    path = photo if photo and os.path.exists(photo) else placeholder_image()
+    path = photo if photo and os.path.exists(photo) else placeholder_image(None if photo else ALL_PATTERNS[index])
     if media and message_id is not None and edit_photo(chat_id, message_id, path, caption, keyboard):
         return
     if message_id is not None:
@@ -323,19 +357,145 @@ def delete_all(chat_id, index):
             remove_file(removed["photo"])
 
 
-RULE_HELP = {
-    "FVG": "FVG ищу по правилам на свечах: дыра между 1-й и 3-й свечой "
-           "(значимые — от импульсной свечи, см. ⚙️ Настройки).",
-    "BOS": "BOS ищу по правилам: цена ЗАКРЫЛАСЬ за последним свингом по тренду.",
-    "CHoCH": "CHoCH ищу по правилам: первый слом структуры против тренда.",
-    "EQH / EQL": "EQH/EQL ищу по правилам: 2+ свинга почти на одной цене, ликвидность ещё не снята.",
-    "Order Block": "Order Block ищу по правилам: последняя свеча против движения перед сломом структуры. "
-                   "Пришлю, когда блок сложился или цена вернулась к нему.",
-    "Breaker Block": "Breaker ищу по правилам: Order Block, который пробили, — бывшее сопротивление "
-                     "стало поддержкой (или наоборот).",
-    "Mitigation Block": "Mitigation ищу по правилам: провал движения без снятия ликвидности "
-                        "(более высокий лой / более низкий хай) и пробой свинга.",
-}
+# --- паттерн, который ещё не ищем: объяснение, «включить без скрина», пример с рынка ----------------
+def is_enabled(chat_id, name):
+    return any(p["name"] == name for p in get_patterns(chat_id))
+
+
+def intro_view(chat_id, index):
+    """Экран паттерна: как бот его ищет и что можно сделать. Главное — ТВОЙ пример."""
+    name = ALL_PATTERNS[index]
+    count = len(examples_of(chat_id, index))
+    text = f"🧩 {name}\n\nКак ищу: {PATTERN_INFO[name]}\n\n"
+    if count:
+        text += f"✅ Ищу. Твоих примеров: {count} — чем больше разных, тем точнее «похоже на твой пример»."
+    else:
+        text += ("📷 Пришли скриншот своего примера — буду искать на рынке ПОХОЖИЕ на него: "
+                 "у каждого трейдера свой «правильный» паттерн.\n"
+                 "Не знаешь, что сфотографировать? Открой «👀 Пример с рынка»: понравился — «💾 В мои примеры».")
+    rows = [[{"text": "📷 Прислать свой пример", "callback_data": f"shot:{index}"}],
+            [{"text": "👀 Пример с рынка", "callback_data": f"demo:{index}"}]]
+    if not count:
+        rows.append([{"text": "Искать без примера (по общему правилу)", "callback_data": f"on:{index}"}])
+    rows.append([{"text": "⬅️ К паттернам", "callback_data": "my"}, TO_MENU])
+    return text, {"inline_keyboard": rows}
+
+
+def enable_pattern(chat_id, index):
+    """Включить поиск без скриншота: по правилам или по встроенному эталону формы."""
+    name = ALL_PATTERNS[index]
+    if not any(p["name"] == name and p.get("builtin") for p in get_patterns(chat_id)):
+        add_pattern(chat_id, name, None, note="без скриншота", shape=template_shape(name), builtin=True)
+    return (f"✅ Ищу «{name}» по общему правилу. Пришли свой пример (📷) — тогда буду искать "
+            "похожие именно на него и писать «похоже на твой пример N%».",
+            saved_keyboard(index))
+
+
+# «👀 Пример с рынка»: реальный случай паттерна на графике со свечами и объёмом
+DEMO_COINS = 25                 # ищем на 25 самых торгуемых монетах
+DEMO_INTERVALS = ("4h", "1d")
+DEMO_SHOW = 12                  # листать можно 12 лучших случаев
+DEMO_TTL = 1800                 # найденные случаи помним 30 минут (для всех пользователей)
+demo_cache = {}                 # название паттерна → (когда искали, [(монета, ТФ, df, находка)])
+demo_lock = threading.Lock()
+demo_shown = {}                 # (chat_id, номер паттерна) → какой случай сейчас на экране
+
+
+def demo_occurrences(name, fetch=None):
+    """Случаи паттерна на топ-монетах: свежие и сильные первыми."""
+    with demo_lock:
+        cached = demo_cache.get(name)
+        if cached and time.time() - cached[0] < DEMO_TTL:
+            return cached[1]
+    pattern = {"name": name, "shape": template_shape(name), "builtin": True}
+    jobs, _ = build_history_jobs([pattern], {"fvg": "significant"})
+    if not jobs:
+        return []
+    _, family_kind, run = jobs[0]
+    found = []
+    symbols = top_symbols(DEMO_COINS)
+    for interval in DEMO_INTERVALS:
+        for symbol, candles in fetch_many(symbols, interval, CANDLES, fetch or get_candles).items():
+            if not candles or len(candles) < 150:
+                continue
+            df = candles_to_df(candles)
+            for item in run(df):
+                if family_kind == "block" and item.get("volume_high") is False:
+                    continue                                   # пример OB — только с повышенным объёмом
+                end = min(item["start"] + item.get("window", 1) - 1, len(df) - 1)
+                fresh = end / len(df)                          # 1.0 — на последней свече
+                found.append((item["score"] + 0.3 * fresh, symbol, interval, df,
+                              {**item, "name": name, "builtin": True}, family_kind))
+    found.sort(key=lambda f: f[0], reverse=True)
+    result = [f[1:] for f in found[:DEMO_SHOW]]
+    with demo_lock:
+        demo_cache[name] = (time.time(), result)
+    return result
+
+
+def demo_view(name, occurrences, pos, index, enabled):
+    """Подпись и кнопки для случая номер pos."""
+    symbol, interval, df, item, family_kind = occurrences[pos]
+    end = min(item["start"] + item.get("window", 1) - 1, len(df) - 1)
+    end = min(item.get("end", end), len(df) - 1)
+    when = f"{df['open_time'].iloc[end]:%d.%m.%Y %H:%M} UTC"
+    detail = item.get("label") or ", ".join(
+        t for t in (KIND_NAMES.get(item.get("kind")), quality_text(item)) if t)
+    caption = (f"👀 {name} — пример с рынка ({pos + 1}/{len(occurrences)})\n"
+               f"{symbol} {interval.upper()} · {when}\n{detail}\n\n"
+               f"Что на картинке: {DEMO_LEGEND.get(family_kind, '')}")
+    rows = [[{"text": "🔄 Другой пример", "callback_data": f"demo:{index}:{(pos + 1) % len(occurrences)}"},
+             {"text": "📊 TradingView", "url": tradingview_link(symbol, interval)}]]
+    if market_example(df, item) is not None:
+        rows.append([{"text": "💾 В мои примеры", "callback_data": f"dsave:{index}"}])
+    if not enabled:
+        rows.append([{"text": "✅ Искать такое", "callback_data": f"on:{index}"}])
+    rows.append([{"text": "⬅️ К паттернам", "callback_data": "my"}, TO_MENU])
+    return caption[:CAPTION_LIMIT], {"inline_keyboard": rows}
+
+
+def show_demo(chat_id, index, pos, message_id=None, media=False):
+    name = ALL_PATTERNS[index]
+    if not media and message_id is not None and (name not in demo_cache):
+        edit_message(chat_id, message_id, f"⏳ Ищу пример «{name}» на {DEMO_COINS} монетах (4H, 1D)…")
+    occurrences = demo_occurrences(name)
+    if not occurrences:
+        show_view(chat_id, message_id, (f"Сейчас не нашёл примеров «{name}» на {DEMO_COINS} монетах 😕 "
+                                        "Попробуй позже.", intro_view(chat_id, index)[1]), media)
+        return
+    pos %= len(occurrences)
+    demo_shown[(chat_id, index)] = occurrences[pos]
+    symbol, interval, df, item, _ = occurrences[pos]
+    path = f"demo_{chat_id}_{int(time.time() * 1000)}.png"
+    with chart_lock:
+        plot_example(df, symbol, interval, item, path, f"{symbol} {interval.upper()} — {name}")
+    caption, keyboard = demo_view(name, occurrences, pos, index, is_enabled(chat_id, name))
+    try:
+        if media and message_id is not None and edit_photo(chat_id, message_id, path, caption, keyboard):
+            return
+        if message_id is not None:
+            delete_message(chat_id, message_id)
+        send_photo(path, caption, chat_id, keyboard)
+    finally:
+        remove_file(path)
+
+
+def save_demo(chat_id, index):
+    """«💾 В мои примеры»: случай с рынка становится примером паттерна (как свой скрин)."""
+    shown = demo_shown.get((chat_id, index))
+    if shown is None:
+        send_message("Пример устарел — открой «👀 Пример с рынка» ещё раз.", chat_id, {"inline_keyboard": [[CLOSE]]})
+        return
+    symbol, interval, df, item, _ = shown
+    example = market_example(df, item)
+    path = f"{PATTERNS_DIR}/{chat_id}_{int(time.time() * 1000)}.png"
+    with chart_lock:
+        plot_example(df, symbol, interval, item, path, f"{symbol} {interval.upper()} — {item['name']}")
+    add_pattern(chat_id, item["name"], path, note=f"с рынка: {symbol} {interval.upper()}", **example)
+    count = len(examples_of(chat_id, index))
+    send_message(f"💾 Сохранил как пример №{count} к «{item['name']}» — теперь ищу и похожие на него.",
+                 chat_id, {"inline_keyboard": [[{"text": "🖼 Мои примеры", "callback_data": f"gal:{index}:{count - 1}"},
+                                                CLOSE]]})
 
 
 # --- настройки (всё листается в одном сообщении) ----------------------------------------------------
@@ -352,7 +512,9 @@ def settings_text(chat_id):
             "рисунок хотя бы на 60% (наклон линий, сужение, путь цены).\n"
             "🎯 Учитывать мои оценки — отсеивать то, что ты отмечал 👎, и писать «тебе подходит N%».\n"
             "🔗 Только совпадения ТФ — монеты, где находки разных таймфреймов подтверждают "
-            "друг друга. Нужно выбрать хотя бы 2 таймфрейма.")
+            "друг друга. Нужно выбрать хотя бы 2 таймфрейма.\n"
+            "📊 OB с объёмом — Order Block только если объём на свече блока или импульсе после неё "
+            "≥ 1.5× среднего за 20 свечей.")
 
 
 def settings_keyboard(chat_id):
@@ -368,6 +530,7 @@ def settings_keyboard(chat_id):
         [{"text": f"🖼 Похожие на пример: {yes('similar_only')}", "callback_data": "set:similar_only"}],
         [{"text": f"🎯 Учитывать оценки 👍/👎: {yes('learn')}", "callback_data": "set:learn"}],
         [{"text": f"🔗 Только совпадения ТФ: {yes('confluence_only')}", "callback_data": "set:confluence_only"}],
+        [{"text": f"📊 OB только с повышенным объёмом: {yes('ob_volume')}", "callback_data": "set:ob_volume"}],
         [TO_MENU],
     ]}
 
@@ -404,15 +567,60 @@ def interval_keyboard(chat_id):
 # --- приём фото ------------------------------------------------------------------------
 def saved_keyboard(index):
     return {"inline_keyboard": [
-        [{"text": "➕ Ещё пример", "callback_data": f"pick:{index}"},
+        [{"text": "📷 Ещё скрин", "callback_data": f"shot:{index}"},
          {"text": "📂 Мои паттерны", "callback_data": "my"}],
         [{"text": "🔍 Сканировать", "callback_data": "scan"}, TO_MENU],
     ]}
 
 
 def retry_keyboard(index):
-    return {"inline_keyboard": [[{"text": "📷 Прислать другой", "callback_data": f"pick:{index}"},
+    return {"inline_keyboard": [[{"text": "📷 Прислать другой", "callback_data": f"shot:{index}"},
                                  {"text": "📂 Мои паттерны", "callback_data": "my"}], [TO_MENU]]}
+
+
+def drawn_levels(path):
+    """Горизонтальные линии, нарисованные на скрине (уровень блока, POC…) — в тех же
+    «пикселях вверх», что и свечи со скрина: подсказка, какой именно паттерн ты имел в виду."""
+    try:
+        analysis = analyze_screenshot(path)
+    except (OSError, ValueError):
+        return []
+    return [analysis.height - 1 - (ln.y1 + ln.y2) / 2 for ln in analysis.lines if abs(ln.angle) < 3]
+
+
+def receive_example(chat_id, name, path):
+    """SMC, Range, флаг / вымпел: читаю свечи со скрина, нахожу на них твой паттерн
+    тем же правилом, что и на рынке, и снимаю отпечаток — с ним буду сравнивать находки."""
+    index = ALL_PATTERNS.index(name)
+    candles = extract_candles(path)
+    fp, item = screenshot_fingerprint(name, candles, drawn_levels(path)) if candles is not None else (None, None)
+    if fp is None:
+        pattern_id = add_pattern(chat_id, name, path, note="скрин без отпечатка")
+        seen = f"вижу {len(candles)} свечей, но" if candles is not None else "не смог прочитать свечи, и"
+        send_message(f"😕 На скрине {seen} не нашёл «{name}» по правилу:\n{PATTERN_INFO[name]}\n\n"
+                     "Скрин сохранил, но сравнивать с ним находки не смогу. Лучше пришли другой: "
+                     "свечи крупно, видно 20–30 свечей до паттерна и несколько после, без индикаторов "
+                     "(объём снизу — можно, я его прочитаю).", chat_id,
+                     {"inline_keyboard": [[{"text": "📷 Прислать другой", "callback_data": f"shot:{index}"},
+                                           {"text": "🗑 Удалить этот", "callback_data": f"bad:{pattern_id}"}],
+                                          [{"text": "📂 Мои паттерны", "callback_data": "my"}, TO_MENU]]})
+        return
+    pattern_id = add_pattern(chat_id, name, path, note="скрин", kind=item.get("kind"), fingerprint=fp)
+    debug_path = f"{PATTERNS_DIR}/{chat_id}_debug.png"
+    with chart_lock:
+        plot_example(candles, "", "", item, debug_path, f"Что я увидел на твоём скрине: {name}", dates=False)
+    volume = "" if "volume" in candles else "\n(объёма на скрине не видно — сравниваю без него)"
+    caption = (f"Вот что я увидел на твоём скрине ({len(candles)} свечей):\n"
+               f"• {kind_text(item)}\n"
+               f"• отпечаток: {describe_fingerprint(fp)}{volume}\n\n"
+               "На рынке буду искать ПОХОЖИЕ на этот пример и писать «похоже на твой пример N%». "
+               "Я правильно нашёл паттерн?")
+    keyboard = {"inline_keyboard": [[
+        {"text": "✅ Верно", "callback_data": f"ok:{pattern_id}"},
+        {"text": "❌ Нет, удалить", "callback_data": f"bad:{pattern_id}"},
+    ]]}
+    send_photo(debug_path, caption[:CAPTION_LIMIT], chat_id, keyboard)
+    remove_file(debug_path)
 
 
 def receive_pattern_photo(chat_id, name, file_id):
@@ -420,12 +628,8 @@ def receive_pattern_photo(chat_id, name, file_id):
     download_photo(file_id, path)
     index = ALL_PATTERNS.index(name)
 
-    if name in RULE_PATTERNS:
-        # SMC по правилам: скрин — пример для тебя, искать его форму не нужно
-        add_pattern(chat_id, name, path)
-        send_message(f"✅ Сохранил «{name}»\n{RULE_HELP[name]}\n"
-                     "Скрин оставил как твой пример — на рынке ищу по правилам, а не по картинке.",
-                     chat_id, saved_keyboard(index))
+    if name in FAMILY:                                    # SMC, Range, флаг, вымпел — по отпечатку
+        receive_example(chat_id, name, path)
         return
 
     analysis = analyze_screenshot(path)
@@ -444,8 +648,6 @@ def receive_pattern_photo(chat_id, name, file_id):
     caption = f"Вот что я увидел в «{name}»:\n• {chart_kind} — жёлтым\n• {lines_text}\n"
     if figure:
         caption += f"• Фигура: {KIND_NAMES[figure]}\n"
-    if name not in SEARCHABLE:
-        caption += "\nИскать этот паттерн на рынке я пока не умею — детектор скоро появится.\n"
     caption += "\nВсё верно?"
     keyboard = {"inline_keyboard": [[
         {"text": "✅ Верно", "callback_data": f"ok:{pattern_id}"},
@@ -458,13 +660,53 @@ def receive_pattern_photo(chat_id, name, file_id):
 TICKER = re.compile(r"^[A-Za-z0-9]{2,15}(/?USDT)?$", re.IGNORECASE)
 
 
+WELCOME_KEYBOARD = {"inline_keyboard": [
+    [{"text": "📂 Выбрать паттерны", "callback_data": "my"}, {"text": "🔍 Сканировать", "callback_data": "scan"}],
+    [TO_MENU]]}
+
+
+def send_welcome(chat_id):
+    send_message(WELCOME, chat_id, WELCOME_KEYBOARD)
+
+
+def handle_command(chat_id, text):
+    """Команды из меню «/» Telegram. Возвращает True, если команда узнана."""
+    command, _, argument = text.partition(" ")
+    command = command.split("@")[0].lower()             # /scan@findercandles_bot — тоже /scan
+    if command in ("/start", "/help"):
+        send_welcome(chat_id)
+    elif command == "/menu":
+        show_menu(chat_id)
+    elif command == "/patterns":
+        show_view(chat_id, None, my_patterns_view(chat_id))
+    elif command == "/scan":
+        start_job(chat_id, run_scan)
+    elif command == "/settings":
+        show_view(chat_id, None, settings_view(chat_id))
+    elif command == "/find":
+        if argument.strip():
+            find_coin(chat_id, argument.strip().replace(" ", ""))
+        else:
+            show_view(chat_id, None, (FIND_TEXT, {"inline_keyboard": [[TO_MENU]]}))
+    else:
+        return False
+    return True
+
+
 def handle_message(message):
     chat_id = message["chat"]["id"]
+    text = message.get("text", "").strip()
+    if first_visit(chat_id) and not text.startswith(("/start", "/help")):
+        send_welcome(chat_id)                          # новичку — сначала объяснение
 
     if "photo" not in message:
-        text = message.get("text", "").strip().replace(" ", "")
-        if TICKER.match(text) and not text.startswith("/"):
-            find_coin(chat_id, text)           # написали тикер — ищем монету
+        if text.startswith("/"):
+            if not handle_command(chat_id, text):
+                show_menu(chat_id)
+            return
+        ticker = text.replace(" ", "")
+        if TICKER.match(ticker):
+            find_coin(chat_id, ticker)           # написали тикер — ищем монету
             return
         show_menu(chat_id)
         return
@@ -547,7 +789,7 @@ def rating_keyboard(chat_id, card_id, coin):
         name = item["name"] + (f" ({quality})" if quality else "")
         row = [{"text": ("✅ " if vote == 1 else "👍 ") + f"{tf.upper()} · {name}", "callback_data": f"rv:{card_id}:{i}:1"},
                {"text": "❌" if vote == -1 else "👎", "callback_data": f"rv:{card_id}:{i}:-1"}]
-        if example_from_item(df, item) is not None:
+        if market_example(df, item) is not None:
             row.append({"text": "💾", "callback_data": f"ex:{card_id}:{i}"})
         rows.append(row)
     rows.append([{"text": "✅ Готово", "callback_data": "hide"}, HOME])
@@ -569,7 +811,7 @@ def vote_card(chat_id, card_id, vote, message_id=None):
             return
         text = "👍 Запомнил: такое тебе подходит." if vote > 0 else "👎 Запомнил: такое не присылать."
         keyboard = None
-        if vote > 0 and example_from_item(entries[0][2], entries[0][1]) is not None:
+        if vote > 0 and market_example(entries[0][2], entries[0][1]) is not None:
             keyboard = {"inline_keyboard": [[{"text": "💾 Сохранить как пример", "callback_data": f"ex:{card_id}:0"}]]}
         send_message(text, chat_id, keyboard)
         return
@@ -594,16 +836,15 @@ def save_example(chat_id, card_id, index):
         outdated(chat_id)
         return
     tf, item, df = coin_entries(coin)[index]
-    example = example_from_item(df, item)
+    example = market_example(df, item)
     if example is None:
-        send_message(f"«{item['name']}» я ищу по правилам — пример не нужен. "
-                     "Лучше ставь 👍 / 👎: так я узнаю, какие из них тебе подходят.", chat_id)
+        send_message(f"«{item['name']}» сохранить как пример не получится — ставь 👍 / 👎, "
+                     "так я узнаю, какие из них тебе подходят.", chat_id)
         return
     path = f"{PATTERNS_DIR}/{chat_id}_{int(time.time() * 1000)}.png"
-    with chart_lock:
-        plot_findings(df, coin["symbol"], [item], path)       # картинка — чтобы было видно, что сохранено
-    add_pattern(chat_id, item["name"], path, note=f"с рынка: {coin['symbol']} {tf.upper()}",
-                kind=example.get("kind"), reference=example.get("reference"), shape=example.get("shape"))
+    with chart_lock:                                  # картинка — чтобы было видно, что сохранено
+        plot_example(df, coin["symbol"], tf, item, path, f"{coin['symbol']} {tf.upper()} — {item['name']}")
+    add_pattern(chat_id, item["name"], path, note=f"с рынка: {coin['symbol']} {tf.upper()}", **example)
     count = sum(p["name"] == item["name"] for p in get_patterns(chat_id))
     record_vote(chat_id, coin, index, 1)                        # сохранил — значит, нравится
     index_name = ALL_PATTERNS.index(item["name"]) if item["name"] in ALL_PATTERNS else None
@@ -844,7 +1085,7 @@ def card_keyboard(card_id, coin, chat_id=None):
                      detail])
         if vote == 1:
             tf, item, df = coin_entries(coin)[0]
-            if example_from_item(df, item) is not None:
+            if market_example(df, item) is not None:
                 rows.append([{"text": "💾 Сохранить как пример", "callback_data": f"ex:{card_id}:0"}])
     bottom = [{"text": "📋 Список", "callback_data": f"list:{ids[0]}"}] if len(ids) > 1 else []
     rows.append(bottom + [HOME])
@@ -1179,6 +1420,10 @@ def handle_callback(query):
         show_menu(chat_id, message_id, media)
         return
 
+    if data == "help":
+        show_view(chat_id, message_id, (WELCOME, WELCOME_KEYBOARD), media)
+        return
+
     if data == "pinehelp":
         send_message(PINE_HOWTO, chat_id, {"inline_keyboard": [[CLOSE, HOME]]})
         return
@@ -1255,7 +1500,24 @@ def handle_callback(query):
         return
 
     # --- паттерны и галерея примеров
-    if action == "pick":
+    if action == "pick":                                # паттерн из списка: объяснение и действия
+        show_view(chat_id, message_id, intro_view(chat_id, int(value)), media)
+        return
+
+    if action == "on":
+        show_view(chat_id, message_id, enable_pattern(chat_id, int(value)), media)
+        return
+
+    if action == "demo":
+        index, _, pos = value.partition(":")
+        start_job(chat_id, show_demo, int(index), int(pos or 0), message_id, media)
+        return
+
+    if action == "dsave":
+        start_job(chat_id, save_demo, int(value))
+        return
+
+    if action == "shot":
         name = ALL_PATTERNS[int(value)]
         waiting[chat_id] = name
         show_view(chat_id, message_id, (
@@ -1334,6 +1596,10 @@ def check_schedule(schedule):
 def main():
     offset = 0
     schedule = Schedule(time.time())
+    try:
+        set_commands(COMMANDS)                           # меню «/» в Telegram
+    except requests.RequestException as error:
+        print("Не смог обновить команды бота:", error)
     print(f"Бот запущен (обновление {VERSION}). Остановить: Ctrl+C")
     while True:
         check_schedule(schedule)

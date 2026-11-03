@@ -97,6 +97,12 @@ def edit_keyboard(chat_id, message_id, keyboard):
     )
 
 
+def set_commands(commands):
+    """Список команд в меню «/» Telegram: [(команда, описание)]."""
+    data = {"commands": json.dumps([{"command": c, "description": d} for c, d in commands])}
+    requests.post(f"{API}/setMyCommands", data=data, timeout=10)
+
+
 def answer_callback(callback_id):
     requests.post(f"{API}/answerCallbackQuery", data={"callback_query_id": callback_id}, timeout=10)
 

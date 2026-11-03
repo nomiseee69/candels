@@ -19,6 +19,11 @@
 без подглядывания в будущее.
 
 Блок сильнее, если импульс от него оставил FVG (имбаланс) — пометка «с FVG».
+
+Объём: на свече блока или на импульсе сразу после неё (2 свечи) объём должен быть
+ПОВЫШЕННЫМ — не меньше 1.5× среднего за 20 свечей до блока. Так крупный игрок
+«оставляет след». volume_ratio — во сколько раз объём выше среднего (×1.8),
+volume_high — да/нет. Фильтр включается в ⚙️ Настройках (по умолчанию включён).
 """
 
 import numpy as np
@@ -32,6 +37,9 @@ MAX_TRACK = 1000        # следим за судьбой кандидата д
 RECENT_BLOCK = 3        # алерт: блок сложился на последних 3 свечах…
 NEAR_ZONE = 0.01        # …или цена подошла к зоне ближе 1% (ретест)
 MAX_AGE = 1000          # старый блок тоже важен, если он не пробит и цена к нему подошла
+VOLUME_HIGH = 1.5       # объём блока ≥ 1.5× среднего за 20 свечей — «повышенный»
+VOLUME_AVERAGE = 20
+VOLUME_REACH = 2        # смотрим свечу блока и 2 свечи импульса после неё
 
 BLOCK_NAMES = {
     "bullish_ob": "бычий OB", "bearish_ob": "медвежий OB",
@@ -108,6 +116,16 @@ def _from_highs(opens, highs, lows, closes, window):
     return blocks
 
 
+def volume_ratios(df):
+    """Во сколько раз объём каждой свечи выше среднего за 20 свечей ДО неё.
+    Нет столбца объёма (тесты) — None, тогда объём не проверяем."""
+    if "volume" not in df:
+        return None
+    volume = df["volume"].astype(float)
+    average = volume.rolling(VOLUME_AVERAGE, min_periods=5).mean().shift(1)
+    return (volume / average.where(average > 0)).to_numpy()
+
+
 MIRROR = {"bearish_ob": "bullish_ob", "bullish_breaker": "bearish_breaker",
           "bullish_mitigation": "bearish_mitigation"}
 
@@ -128,6 +146,7 @@ def all_blocks(df, window=SWING_WINDOW):
         bottom, top = blk["zone"]
         blocks.append({**blk, "kind": MIRROR[blk["kind"]], "zone": (-top, -bottom)})
 
+    ratios = volume_ratios(df)
     # имбалансы по направлению: свеча начала FVG → бычий/медвежий
     gaps = [(g["start"], g["kind"].startswith("bullish"))
             for g in find_all_fvg(df, lookback=len(df), include_filled=True)]
@@ -144,6 +163,11 @@ def all_blocks(df, window=SWING_WINDOW):
             blk["imbalance"] = any(blk["start"] <= g <= blk["end"] and up == bullish for g, up in gaps)
         else:
             blk["imbalance"] = False
+        if ratios is not None:
+            near = ratios[blk["start"]:blk["start"] + VOLUME_REACH + 1]
+            near = near[np.isfinite(near)]
+            blk["volume_ratio"] = float(near.max()) if len(near) else None
+            blk["volume_high"] = blk["volume_ratio"] is not None and blk["volume_ratio"] >= VOLUME_HIGH
         # нетронутый блок сильнее, блок с FVG — ещё сильнее
         blk["score"] = (0.92 if blk["touched_at"] is None else 0.88) + (0.05 if blk["imbalance"] else 0)
         blk["label"] = describe_block(blk)
@@ -159,19 +183,25 @@ def describe_block(blk):
     else:
         state = "тестировался"
     where = "цена в зоне" if blk["distance"] == 0 else f"до зоны {blk['distance']:.1%}"
-    tag = " (с FVG)" if blk.get("imbalance") else ""
+    tags = (["с FVG"] if blk.get("imbalance") else []) + (
+        [f"объём ×{blk['volume_ratio']:.1f}"] if blk.get("volume_ratio") is not None else [])
+    tag = f" ({', '.join(tags)})" if tags else ""
     return f"{BLOCK_NAMES[blk['kind']]}{tag} {bottom:.6g}–{top:.6g}, {state}, {where}"
 
 
-def find_block(df, family):
+def find_block(df, family, volume_only=False, choose=None):
     """Действующий блок семейства family ("ob" / "breaker" / "mitigation") для алерта:
-    только что сложился или цена подошла к нему (ретест). Ближайший к цене."""
+    только что сложился или цена подошла к нему (ретест). Ближайший к цене.
+    volume_only — только Order Block с повышенным объёмом (у Breaker/Mitigation не проверяем)."""
     n = len(df)
     candidates = [
         blk for blk in all_blocks(df)
         if blk["family"] == family and blk["broken_at"] is None and blk["end"] >= n - MAX_AGE
         and (blk["end"] >= n - RECENT_BLOCK or blk["distance"] <= NEAR_ZONE)
+        and not (volume_only and family == "ob" and blk.get("volume_high") is False)
     ]
     if not candidates:
         return None
+    if choose:                                        # самый похожий на пример пользователя
+        return max(candidates, key=choose)
     return min(candidates, key=lambda blk: (blk["distance"], -blk["end"]))

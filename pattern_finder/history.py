@@ -189,6 +189,13 @@ def summarize(name, family_kind, results):
         return line
 
     line = f"• {name}: {plural(len(results), 'случай', 'случая', 'случаев')}"
+    if family_kind in ("flags", "range"):
+        ups = sum(r.get("breakout") == "up" for r in results)
+        downs = sum(r.get("breakout") == "down" for r in results)
+        line += f"\n   выход за {HORIZON} свечей: вверх {ups}, вниз {downs}, ещё внутри {len(results) - ups - downs}"
+        if family_kind == "flags":
+            along = sum(r.get("breakout") == r.get("direction") for r in results)
+            line += f" (по флагштоку — {along})"
     if family_kind == "lines":
         kinds = {}
         for r in results:
@@ -232,6 +239,12 @@ def describe_occurrence(df, family_kind, f):
     text = _date(df, end)
     if family_kind == "structure":
         return f"{text} {'вверх' if f['direction'] == 'up' else 'вниз'} ({_result(f.get('outcome'))})"
+    if family_kind in ("flags", "range"):
+        if family_kind == "flags":
+            text += " бычий" if f.get("direction") == "up" else " медвежий"
+        if f.get("breakout"):
+            text += ", выход " + ("вверх" if f["breakout"] == "up" else "вниз")
+        return f"{text} ({_result(f.get('outcome'))})"
     if family_kind == "lines":
         text += f" {SHORT_KIND[f['kind']]}"
         if f.get("touches"):

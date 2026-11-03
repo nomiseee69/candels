@@ -47,10 +47,13 @@ def save_users(users):
 
 
 @locked
-def add_pattern(chat_id, name, photo_path, note="", kind=None, reference=None, shape=None):
+def add_pattern(chat_id, name, photo_path, note="", kind=None, reference=None, shape=None, builtin=False,
+                fingerprint=None):
     """Сохраняет пример паттерна и возвращает его id. Примеров одного паттерна может быть много.
     kind — тип фигуры с рисунка пользователя (например, "symmetric"), если линии нарисованы;
-    reference / shape — эталон, снятый прямо с рынка (кнопка «💾 Сохранить как пример»)."""
+    reference / shape — эталон, снятый прямо с рынка (кнопка «💾 Сохранить как пример»);
+    builtin — поиск включён без скриншота (по правилам или встроенному эталону), photo_path = None;
+    fingerprint — отпечаток примера SMC / Range / флага (fingerprint.py): с чем сравнивать находки."""
     users = load_users()
     user = users.setdefault(str(chat_id), {"patterns": []})
     pattern_id = str(int(time.time() * 1000))
@@ -61,6 +64,10 @@ def add_pattern(chat_id, name, photo_path, note="", kind=None, reference=None, s
         entry["reference"] = reference
     if shape is not None:
         entry["shape"] = shape
+    if builtin:
+        entry["builtin"] = True
+    if fingerprint is not None:
+        entry["fingerprint"] = fingerprint
     user["patterns"].append(entry)
     save_users(users)
     return pattern_id
@@ -166,10 +173,10 @@ def set_coins(chat_id, count):
 
 # --- настройки поиска ------------------------------------------------------------------------------
 DEFAULT_SETTINGS = {"fvg": "significant", "combos_only": False, "similar_only": False, "learn": True,
-                    "confluence_only": False}
+                    "confluence_only": False, "ob_volume": True}
 SETTING_VALUES = {"fvg": ["significant", "all"], "combos_only": [False, True],
                   "similar_only": [False, True], "learn": [True, False],
-                  "confluence_only": [False, True]}
+                  "confluence_only": [False, True], "ob_volume": [True, False]}
 
 
 def get_settings(chat_id):
@@ -188,6 +195,20 @@ def toggle_setting(chat_id, key):
     user["settings"] = settings
     save_users(users)
     return settings
+
+
+# --- новый пользователь -----------------------------------------------------------------------------
+@locked
+def first_visit(chat_id):
+    """True — человек пишет боту впервые (показать приветствие). Отмечает, что приветствие было."""
+    users = load_users()
+    user = users.get(str(chat_id))
+    if user is not None and (user.get("welcomed") or user.get("patterns")):
+        return False
+    user = users.setdefault(str(chat_id), {"patterns": []})
+    user["welcomed"] = True
+    save_users(users)
+    return True
 
 
 # --- оценки 👍 / 👎 -------------------------------------------------------------------------------
