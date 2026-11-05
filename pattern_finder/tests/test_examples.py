@@ -183,7 +183,7 @@ def test_bot_reads_smc_example_from_screenshot(tmp_path):
         bot.waiting[5] = "Order Block"
         bot.handle_message({"chat": {"id": 5}, "photo": [{"file_id": "x"}]})
         caption, keyboard = sent.photos[-1]
-        assert caption.startswith("Вот что я увидел на твоём скрине") and "импульс" in caption
+        assert caption.startswith("Вот что я увидел на твоём скрине") and "ATR" not in caption
         saved = storage.get_patterns(5)[-1]
         assert saved["name"] == "Order Block" and saved["fingerprint"]["family"] == "block"
         assert keyboard["inline_keyboard"][0][0]["callback_data"] == f"ok:{saved['id']}"
@@ -231,7 +231,7 @@ def test_bot_reads_drawn_range(tmp_path):
         bot.waiting[5] = "Range"
         bot.handle_message({"chat": {"id": 5}, "photo": [{"file_id": "x"}]})
         caption, _ = sent.photos[-1]
-        assert "нашёл твой прямоугольник и линию POC" in caption and "POC в" in caption and "%" not in caption
+        assert "нашёл твой прямоугольник и линию POC" in caption and "%" not in caption
         assert storage.get_patterns(5)[-1]["fingerprint"]["family"] == "range"
     finally:
         storage.FILE = original

@@ -3,7 +3,18 @@
 Тарифы
   Free — 2 паттерна, ручной скан 3 раза в день, без автоскана и без нейросети-мозга.
   Pro  — всё без ограничений. 30 дней или год (со скидкой).
-  Новичку — 7 дней Pro бесплатно (один раз).
+  Новичку — 3 дня Pro бесплатно (один раз на аккаунт Telegram), потом сам переходит на Free.
+
+Защита от обмана
+  • Счета звёздами создаёт только сам бот (нужен его токен), в счёте записаны план и цена
+    («pro_month_500»). Перед списанием Telegram спрашивает бота (pre_checkout) — бот проверяет
+    план, валюту XTR и что сумма = цене в счёте; после оплаты проверяет ещё раз.
+  • Сообщение «оплачено» (successful_payment) присылает только Telegram — подделать его
+    пользователь не может. Один и тот же платёж (charge_id) засчитывается один раз.
+  • Возврат звёзд (refunded_payment) — Pro снимается сразу.
+  • ЮKassa: бот сам спрашивает у ЮKassa статус платежа по его id (не верит пользователю) и
+    проверяет: оплачен, сумма и валюта = цене плана, платёж создан для этого же пользователя,
+    не тестовый (кроме YOOKASSA_ALLOW_TEST=1). Один платёж — один раз.
   Админ (ADMIN_IDS в .env, по умолчанию TELEGRAM_CHAT_ID) — всегда Pro.
 
 Оплата
@@ -17,7 +28,7 @@
 
 Настройки в .env (все необязательные, кроме ключей ЮKassa для оплаты картой):
   ADMIN_IDS=123,456            STARS_MONTH=500   STARS_YEAR=4800
-  RUB_MONTH=990  RUB_YEAR=9490 TRIAL_DAYS=7
+  RUB_MONTH=990  RUB_YEAR=9490 TRIAL_DAYS=3
   YOOKASSA_SHOP_ID=…  YOOKASSA_SECRET_KEY=…  YOOKASSA_RETURN_URL=https://t.me/имя_бота
 """
 
@@ -46,7 +57,7 @@ PLANS = {   # план: (дней, звёзд, рублей, название)
     "year": (365, _int("STARS_YEAR", 4800), _int("RUB_YEAR", 9490), "Pro на год (−20%)"),
 }
 USD = {"month": 10, "year": 96}     # для текста: ≈ $10 / ≈ $96
-TRIAL_DAYS = _int("TRIAL_DAYS", 7)
+TRIAL_DAYS = _int("TRIAL_DAYS", 3)
 FREE = {"patterns": 2, "scans": 3}  # Free: паттернов, ручных сканов в день
 REMIND_DAYS = 3                     # напомнить о продлении за 3 дня
 
@@ -79,9 +90,19 @@ def status(chat_id, now=None):
             sub = _sub(user)
             if not sub.get("trial_used"):
                 sub.update(trial_used=True, until=max(sub.get("until") or 0, now + TRIAL_DAYS * DAY),
-                           source="trial")
+                           source="trial", trial_started=now)
             return dict(sub)
         sub = storage.update_user(chat_id, give_trial)
+    elif sub.get("source") == "trial" and sub.get("until"):
+        # пробный не длиннее TRIAL_DAYS (в обн. 40 он был 7 дней — укорачиваем выданные тогда)
+        started = sub.get("trial_started") or sub["until"] - 7 * DAY
+        limit = started + TRIAL_DAYS * DAY
+        if sub["until"] > limit + 60:
+
+            def shorten(user):
+                _sub(user).update(until=limit, trial_started=started)
+                return dict(_sub(user))
+            sub = storage.update_user(chat_id, shorten)
     until = sub.get("until") or 0
     return {"pro": until > now, "until": until or None, "source": sub.get("source"),
             "trial": sub.get("source") == "trial", "admin": False, "recurring": sub.get("recurring", False)}
@@ -181,7 +202,7 @@ def stars_links(api_post):
     for plan, (days, stars, _, title) in PLANS.items():
         if plan in _links:
             continue
-        data = {"title": title, "payload": f"pro_{plan}", "currency": "XTR",
+        data = {"title": title, "payload": f"pro_{plan}_{stars}", "currency": "XTR",
                 "description": "Pattern Finder Pro: все паттерны, автоскан, нейросеть, разметка TradingView.",
                 "prices": json.dumps([{"label": title, "amount": stars}])}
         if plan == "month":
@@ -192,17 +213,35 @@ def stars_links(api_post):
     return dict(_links)
 
 
+def parse_payload(payload):
+    """«pro_month_500» → ("month", 500); старый формат «pro_month» → ("month", None)."""
+    parts = (payload or "").split("_")
+    if len(parts) < 2 or parts[0] != "pro" or parts[1] not in PLANS:
+        return None, None
+    price = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+    return parts[1], price
+
+
+def valid_stars(payment):
+    """Платёж звёздами честный: наш план, валюта XTR, сумма = цене из счёта (и не ноль)."""
+    plan, price = parse_payload(payment.get("invoice_payload"))
+    if plan is None or payment.get("currency") != "XTR":
+        return False
+    amount = payment.get("total_amount") or 0
+    return amount > 0 and amount == (price if price is not None else PLANS[plan][1])
+
+
 def check_pre_checkout(query):
     """Можно ли принять платёж (Telegram спрашивает перед списанием)."""
-    payload = query.get("invoice_payload", "")
-    return payload.startswith("pro_") and payload[4:] in PLANS and query.get("currency") == "XTR"
+    return valid_stars(query)
 
 
 def stars_paid(chat_id, payment, now=None):
     """successful_payment → продлить подписку. Возвращает текст для пользователя (или None — повтор)."""
     now = now or time.time()
-    plan = payment.get("invoice_payload", "")[4:]
-    if plan not in PLANS:
+    plan, _ = parse_payload(payment.get("invoice_payload"))
+    if not valid_stars(payment):
+        print(f"⚠️ Подозрительный платёж от {chat_id}: {payment}")
         return None
     charge = payment.get("telegram_payment_charge_id") or str(uuid.uuid4())
     if not storage.add_payment(charge, chat_id, "stars", plan, payment.get("total_amount", 0), "XTR",
@@ -216,6 +255,15 @@ def stars_paid(chat_id, payment, now=None):
     renew = " Продление — автоматически каждые 30 дней, отменить можно в настройках Telegram." \
         if payment.get("subscription_expiration_date") else ""
     return f"💎 Спасибо! Pro активен до {until_text(until)}.{renew}"
+
+
+def stars_refunded(chat_id, refund):
+    """refunded_payment: звёзды вернулись пользователю — Pro снимаем. True — было что снимать."""
+    charge = refund.get("telegram_payment_charge_id")
+    if not charge or not storage.set_payment_status(charge, "refunded"):
+        return False
+    revoke(chat_id)
+    return True
 
 
 # --- ЮKassa -----------------------------------------------------------------------------------------
@@ -250,6 +298,19 @@ def yookassa_create(chat_id, plan, http=requests):
     return payment["confirmation"]["confirmation_url"]
 
 
+def yookassa_honest(payment, chat_id, plan):
+    """Платёж ЮKassa тот самый: сумма и валюта = цене плана, создан для этого пользователя, не тестовый."""
+    amount = payment.get("amount") or {}
+    try:
+        value = float(amount.get("value", 0))
+    except (TypeError, ValueError):
+        return False
+    meta = payment.get("metadata") or {}
+    test_ok = not payment.get("test") or os.getenv("YOOKASSA_ALLOW_TEST") == "1"
+    return (amount.get("currency") == "RUB" and abs(value - PLANS[plan][2]) < 0.01
+            and str(meta.get("chat_id")) == str(chat_id) and meta.get("plan") == plan and test_ok)
+
+
 def yookassa_check(chat_id=None, http=requests, now=None):
     """Спросить ЮKassa о неоплаченных ссылках. Возвращает [(chat_id, текст)] — кому сообщить."""
     if not yookassa_on():
@@ -268,7 +329,9 @@ def yookassa_check(chat_id=None, http=requests, now=None):
                 continue
             state = payment.get("status")
             done = state in ("succeeded", "canceled") or now - item["at"] > PENDING_HOURS * 3600
-            if state == "succeeded" and payment.get("paid"):
+            if state == "succeeded" and payment.get("paid") and not yookassa_honest(payment, key, item["plan"]):
+                print(f"⚠️ Подозрительный платёж ЮKassa {item['id']} для {key}")
+            elif state == "succeeded" and payment.get("paid"):
                 amount = float(payment.get("amount", {}).get("value", 0))
                 if storage.add_payment(item["id"], key, "yookassa", item["plan"], amount, "RUB", data=payment):
                     until = extend(int(key), PLANS[item["plan"]][0], source="yookassa", now=now)
@@ -290,7 +353,8 @@ def reminders(now=None):
         if not until or is_admin(int(key)):
             continue
         left = until - now
-        if 0 < left <= REMIND_DAYS * DAY and not sub.get("recurring") and sub.get("reminded") != until:
+        window = (1 if sub.get("source") == "trial" else REMIND_DAYS) * DAY     # пробный — за сутки
+        if 0 < left <= window and not sub.get("recurring") and sub.get("reminded") != until:
             what = "Пробный Pro" if sub.get("source") == "trial" else "Pro"
             out.append((int(key), f"⏰ {what} закончится {until_text(until)}. Продлить — «💎 Подписка»."))
             storage.update_user(key, lambda u, x=until: _sub(u).__setitem__("reminded", x))
@@ -320,6 +384,7 @@ def stats(now=None):
     paid = storage.payments(since=now - 30 * DAY)
     stars = sum(p["amount"] for p in paid if p["currency"] == "XTR")
     rub = sum(p["amount"] for p in paid if p["currency"] == "RUB")
-    auto = sum(bool(u.get("autoscan")) for u in users.values())
+    auto = sum(bool(u.get("autoscan")) and ((u.get("sub") or {}).get("until") or 0) > now
+               for u in users.values())
     return (f"👥 Пользователей: {len(users)}\n💎 Pro (платные): {pro} · пробный: {trial}\n"
             f"🔔 Автоскан включён: {auto}\n💰 За 30 дней: {len(paid)} оплат — ⭐ {stars:.0f}, ₽ {rub:.0f}")

@@ -123,22 +123,39 @@ def _bullish(item):
     return str(item.get("kind", "")).startswith("bullish") or item.get("direction") == "up"
 
 
+class Draw(str):
+    """Строка Pine-кода объекта + те же данные по полям (data) — для короткого кода индикатора."""
+
+    def __new__(cls, code, data):
+        obj = str.__new__(cls, code)
+        obj.data = data
+        return obj
+
+
 def _label(df, x, y, text, color, style="label.style_label_left", size="size.small"):
-    return ("label", f'label.new({_time(df, x)}, {_price(y)}, "{_text(text)}", xloc=xloc.bar_time, '
-                     f"style={style}, color={CLEAR}, textcolor={color}, size={size})")
+    t = _time(df, x)
+    return ("label", Draw(f'label.new({t}, {_price(y)}, "{_text(text)}", xloc=xloc.bar_time, '
+                          f"style={style}, color={CLEAR}, textcolor={color}, size={size})",
+                          {"x": t, "y": float(y), "text": str(text), "color": color, "style": style, "size": size}))
 
 
 def _line(df, x0, y0, x1, y1, color, width, style="line.style_solid", extend="extend.none"):
-    return ("line", f"line.new({_time(df, x0)}, {_price(y0)}, {_time(df, x1)}, {_price(y1)}, "
-                    f"xloc=xloc.bar_time, extend={extend}, color={color}, width={width}, style={style})")
+    t0, t1 = _time(df, x0), _time(df, x1)
+    return ("line", Draw(f"line.new({t0}, {_price(y0)}, {t1}, {_price(y1)}, "
+                         f"xloc=xloc.bar_time, extend={extend}, color={color}, width={width}, style={style})",
+                         {"x1": t0, "y1": float(y0), "x2": t1, "y2": float(y1), "color": color, "width": width,
+                          "style": style, "extend": extend}))
 
 
 def _box(df, x0, top, x1, bottom, color, alpha, text="", extend="extend.none", border="line.style_solid"):
-    return ("box", f"box.new({_time(df, x0)}, {_price(top)}, {_time(df, x1)}, {_price(bottom)}, "
-                   f"xloc=xloc.bar_time, extend={extend}, border_color=color.new({color}, 70), "
-                   f"border_style={border}, bgcolor=color.new({color}, {alpha}), "
-                   f'text="{_text(text)}", text_size=size.tiny, text_color={color}, '
-                   f"text_halign=text.align_right, text_valign=text.align_top)")
+    t0, t1 = _time(df, x0), _time(df, x1)
+    return ("box", Draw(f"box.new({t0}, {_price(top)}, {t1}, {_price(bottom)}, "
+                        f"xloc=xloc.bar_time, extend={extend}, border_color=color.new({color}, 70), "
+                        f"border_style={border}, bgcolor=color.new({color}, {alpha}), "
+                        f'text="{_text(text)}", text_size=size.tiny, text_color={color}, '
+                        f"text_halign=text.align_right, text_valign=text.align_top)",
+                        {"x1": t0, "top": float(top), "x2": t1, "bottom": float(bottom), "color": color,
+                         "alpha": alpha, "text": str(text), "extend": extend, "border": border}))
 
 
 # --- рисование одной находки ---------------------------------------------------------------------
@@ -477,18 +494,16 @@ def _table(groups, layers, tfs):
 
 
 # --- скрипт целиком -------------------------------------------------------------------------------
-def pine_script(symbol, interval, groups, history_default=True):
-    """Код индикатора Pine v5 для одной монеты и всех её таймфреймов.
-
-    groups — список (df, находки, это_история[, таймфрейм]).
+def _collect(groups, interval):
+    """Что рисовать: (группы, слои, ТФ, объекты, id оставленных объектов).
+    Объект — (таймфрейм, слой, категория, приоритет, время, вид, код Draw).
     Если объектов больше лимита Pine, оставляем все текущие, потом живые зоны,
     потом самые свежие прошлые."""
     groups = _normalize(groups, interval)
     layers = plan(groups)
     tfs = list(layers)
     multi = len(tfs) > 1
-
-    objects = []                      # (таймфрейм, слой, категория, приоритет, время, вид, код)
+    objects = []
     priority = {"now": 2, "alive": 1, "past": 0}
     for tf in tfs:
         tag = f"{tf.upper()} " if multi else ""
@@ -503,7 +518,17 @@ def pine_script(symbol, interval, groups, history_default=True):
         current = [o for o in same if o[1] != "past"]
         past = [o for o in same if o[1] == "past"][:MAX_PAST]
         kept += (current + past)[:MAX_OBJECTS]
-    kept_ids = set(map(id, kept))
+    return groups, layers, tfs, objects, set(map(id, kept))
+
+
+def pine_script(symbol, interval, groups, history_default=True):
+    """Код индикатора Pine v5 для одной монеты и всех её таймфреймов.
+
+    groups — список (df, находки, это_история[, таймфрейм]).
+    Если объектов больше лимита Pine, оставляем все текущие, потом живые зоны,
+    потом самые свежие прошлые."""
+    groups, layers, tfs, objects, kept_ids = _collect(groups, interval)
+    multi = len(tfs) > 1
 
     title = " ".join(tf.upper() for tf in tfs) or interval.upper()
     head = [

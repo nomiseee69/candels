@@ -120,6 +120,19 @@ def add_payment(payment_id, chat_id, source, plan, amount, currency, status="suc
     return cursor.rowcount == 1
 
 
+@locked
+def set_payment_status(payment_id, status):
+    """Пометить платёж (например, "refunded"). True — платёж был и статус поменялся."""
+    if not os.path.exists(db_path()):
+        return False
+    connection = _connect()
+    with connection:
+        cursor = connection.execute("UPDATE payments SET status = ? WHERE id = ? AND status != ?",
+                                    (status, str(payment_id), status))
+    connection.close()
+    return cursor.rowcount == 1
+
+
 def payments(since=0):
     if not os.path.exists(db_path()):
         return []

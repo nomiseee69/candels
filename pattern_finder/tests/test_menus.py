@@ -123,7 +123,7 @@ def test_gallery_browse_and_delete(tmp_path):
         assert datas(rec.keyboards[-1]) == [f"gyes:{index}", f"gal:{index}:0"]
         press(f"gyes:{index}", message_id=78, photo=True)
         assert storage.get_patterns(5) == [] and 78 in rec.deleted
-        assert rec.sent[-1][0].startswith("📂 Выбери паттерн и пришли скриншот своего примера")
+        assert rec.sent[-1][0].startswith("📂 Выбери паттерн")
         press("menu", message_id=79, photo=True)                        # из галереи — меню вместо картинки
         assert 79 in rec.deleted and rec.sent[-1][0].startswith("🤖 Pattern Finder")
     finally:
@@ -223,8 +223,9 @@ def test_viewer_vote_marks_button_and_list_moves_down(tmp_path):
         rec.restore()
 
 
-def test_markup_file_replies_to_card_with_links():
+def test_markup_file_replies_to_card_with_links(tmp_path):
     rec = Recorder()
+    original = use_storage(tmp_path)
     try:
         df = pd.DataFrame({"open_time": pd.date_range("2026-10-01", periods=60, freq="4h", tz="UTC"),
                            "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0})
@@ -238,6 +239,7 @@ def test_markup_file_replies_to_card_with_links():
         assert len(urls) == 2 and "interval=240" in urls[1]
         assert datas(keyboard)[-2:] == ["pinehelp", "home"]                 # после TradingView — в меню
     finally:
+        storage.FILE = original
         rec.restore()
 
 
@@ -280,7 +282,7 @@ def test_welcome_for_new_user_and_commands(tmp_path):
     bot.find_coin = lambda chat_id, query: jobs.append(("find", query))
     try:
         bot.handle_message({"chat": {"id": 9}, "text": "привет"})       # первое сообщение — приветствие
-        assert rec.sent[0][0].startswith("👋 Привет! Я Pattern Finder") and "/scan" in rec.sent[0][0]
+        assert rec.sent[0][0].startswith("👋 Привет! Я Pattern Finder") and "Мои паттерны" in rec.sent[0][0]
         assert rec.sent[-1][0].startswith("🤖 Pattern Finder")           # и меню
         count = len(rec.sent)
         bot.handle_message({"chat": {"id": 9}, "text": "привет"})       # второй раз — только меню

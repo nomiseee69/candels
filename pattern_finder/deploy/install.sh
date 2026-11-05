@@ -9,7 +9,7 @@ echo "▶ Папка проекта: $DIR, пользователь: $USER_NAME"
 
 echo "▶ Ставлю Python"
 sudo apt-get update -y
-sudo apt-get install -y python3 python3-venv python3-pip
+sudo apt-get install -y python3 python3-venv python3-pip git build-essential
 
 echo "▶ Виртуальное окружение и библиотеки"
 cd "$DIR"
@@ -30,6 +30,7 @@ sudo systemctl enable pattern-finder
 
 echo
 echo "✅ Готово. Дальше:"
-echo "   nano .env                              — заполни токен и chat_id"
+echo "   nano .env                              — заполни токен и chat_id (ADMIN_IDS — твой id)"
+echo "   .venv/bin/python setup_brain.py        — нейросеть для понимания слов (по желанию, ~2 ГБ)"
 echo "   sudo systemctl restart pattern-finder  — запустить / перезапустить"
 echo "   journalctl -u pattern-finder -f        — смотреть логи (выход: Ctrl+C)"

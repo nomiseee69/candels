@@ -159,16 +159,10 @@ def find_card(chat_id, card_id):
         return cards_by_chat.get(chat_id, {}).get(card_id)
 
 TIPS = (
-    "Как сделать скриншот, чтобы я его понял:\n"
-    "• шкалу цены и объём можно оставить — я отличу их от свечей; индикаторы лучше скрыть\n"
-    "• свечи или линия — подходит любая тема, светлая или тёмная\n"
-    "• отметь свой паттерн — так я точно пойму, какой именно ты имеешь в виду:\n"
-    "   FVG / OB / Breaker / Mitigation — закрась зону прямоугольником;\n"
-    "   BOS / CHoCH / EQH / EQL — проведи горизонтальную линию уровня;\n"
-    "   треугольник, клин, канал, флаг, вымпел — две линии границ;\n"
-    "   боковик — прямоугольник; двойное дно, ГиП — можно ничего не рисовать\n"
-    "• в ПОДПИСИ к скрину опиши паттерн словами — «OB, снял ликвидность, с объёмом, только 4H»: "
-    "я пойму условия и буду искать именно такой"
+    "Как сделать скриншот:\n"
+    "• любая тема и масштаб, индикаторы лучше скрыть\n"
+    "• отметь паттерн: зону — прямоугольником, уровень — линией, фигуру — двумя линиями\n"
+    "• в подписи можно описать его словами: «OB, снял ликвидность, с объёмом»"
 )
 
 
@@ -331,14 +325,11 @@ def profile_view(chat_id):
 def subscription_view(chat_id):
     st = billing.status(chat_id)
     month, year = billing.PLANS["month"], billing.PLANS["year"]
-    lines = [f"💎 Подписка — {plan_line(chat_id)}\n",
-             "Pro: все 17 паттернов без лимита, сканы без ограничений, 🔔 автоскан после закрытия свечи, "
-             "🧠 нейросеть понимает любые описания и вопросы, разметка TradingView.",
-             f"Free: {billing.FREE['patterns']} паттерна, {billing.FREE['scans']} скана в день, "
-             "без автоскана и нейросети.\n",
-             f"• месяц — ⭐ {month[1]} или {month[2]} ₽ (≈ ${billing.USD['month']})",
-             f"• год — ⭐ {year[1]} или {year[2]} ₽ (≈ ${billing.USD['year']}, скидка 20%)\n",
-             "⭐ Звёзды — прямо в Telegram, месяц продлевается сам. 💳 Карта / СБП — через ЮKassa.",
+    lines = [f"💎 Подписка\n{plan_line(chat_id)}\n",
+             "Pro — все паттерны, без лимита сканов, 🔔 автоскан и ответы на любые вопросы.",
+             f"Free — {billing.FREE['patterns']} паттерна и {billing.FREE['scans']} скана в день.\n",
+             f"• месяц — ⭐ {month[1]} или {month[2]} ₽",
+             f"• год — ⭐ {year[1]} или {year[2]} ₽ (−20%)\n",
              DISCLAIMER]
     rows = []
     try:
@@ -397,7 +388,17 @@ def handle_payment(message):
     text = billing.stars_paid(chat_id, message["successful_payment"])
     if text:
         send_message(text, chat_id, {"inline_keyboard": [[TO_MENU]]})
-        alert_admins(f"💰 Оплата звёздами: {chat_id}, {message['successful_payment'].get('total_amount')} ⭐", 0)
+        alert_admins(f"💰 Оплата звёздами: {user_title(chat_id)}, {message['successful_payment'].get('total_amount')} ⭐", 0)
+    else:
+        alert_admins(f"⚠️ Платёж не засчитан (повтор или не та сумма): {chat_id} {message['successful_payment']}", 0)
+
+
+def handle_refunded(message):
+    """Звёзды вернулись пользователю (Telegram сообщил refunded_payment) — Pro снимаем."""
+    chat_id = message["chat"]["id"]
+    if billing.stars_refunded(chat_id, message["refunded_payment"]):
+        send_message("↩️ Оплата возвращена — подписка Pro отменена.", chat_id, {"inline_keyboard": [[TO_MENU]]})
+        alert_admins(f"↩️ Возврат звёзд: {user_title(chat_id)}", 0)
 
 
 def handle_pre_checkout(query):
@@ -406,10 +407,13 @@ def handle_pre_checkout(query):
 
 
 # --- админ ------------------------------------------------------------------------------------------
-ADMIN_HELP = ("Админ:\n/admin — статистика и баланс звёзд бота\n/grant ID ДНЕЙ — выдать Pro\n"
-              "/revoke ID — забрать Pro (сразу Free — удобно проверить ограничения)\n"
-              "/user ID — о пользователе и его оплатах\n/refund ID — вернуть последнюю оплату звёздами\n"
-              "/broadcast ТЕКСТ — сообщение всем\n/backup — копия базы сейчас")
+ADMIN_HELP = ("🛠 Админ-панель — всё кнопками ниже. Команды тоже работают (вместо ID можно @username):\n"
+              "/grant @user 30 — выдать Pro на 30 дней · /revoke @user — забрать Pro\n"
+              "/user @user — карточка · /refund @user — вернуть последнюю оплату звёздами\n"
+              "/broadcast текст — сообщение всем · /backup — копия базы")
+USERS_PAGE = 8
+broadcast_draft = {}            # админ → текст рассылки, ждёт подтверждения
+writing_broadcast = set()       # админ нажал «📣 Рассылка» — следующее сообщение = текст
 
 
 def stars_balance():
@@ -420,52 +424,199 @@ def stars_balance():
     return None
 
 
+def find_user_id(word):
+    """«123456» или «@username» → chat_id или None."""
+    word = (word or "").strip()
+    if word.lstrip("-").isdigit():
+        return int(word)
+    name = word.lstrip("@").lower()
+    if not name:
+        return None
+    for key, user in storage.load_users().items():
+        if (user.get("username") or "").lower() == name:
+            return int(key)
+    return None
+
+
+def remember_username(message):
+    """Запоминаем @username — чтобы админ мог писать /grant @user, а в списке было видно, кто есть кто."""
+    sender = message.get("from") or {}
+    chat_id = message.get("chat", {}).get("id")
+    if not chat_id or sender.get("id") != chat_id:
+        return
+    name = sender.get("username") or sender.get("first_name") or ""
+    if name and storage.get_user(chat_id).get("username") != name:
+        storage.update_user(chat_id, lambda u: u.__setitem__("username", name))
+
+
+def user_title(key, user=None):
+    user = user if user is not None else storage.get_user(key)
+    name = user.get("username")
+    return f"@{name}" if name else str(key)
+
+
+def admin_view(chat_id):
+    balance = stars_balance()
+    wallet = (f"\n⭐ На балансе бота: {balance} звёзд — это твои деньги; вывод: профиль бота в Telegram → "
+              "«Баланс» / Fragment" if balance is not None else "")
+    rows = [[{"text": "👥 Пользователи", "callback_data": "adm:users:0"},
+             {"text": "📣 Рассылка", "callback_data": "adm:bc"}],
+            [{"text": "💾 Копия базы", "callback_data": "adm:backup"},
+             {"text": "🔄 Обновить", "callback_data": "adm:home"}], [TO_MENU]]
+    return billing.stats() + wallet + "\n\n" + ADMIN_HELP, {"inline_keyboard": rows}
+
+
+def users_view(page=0):
+    users = sorted(storage.load_users().items(), key=lambda kv: -((kv[1].get("sub") or {}).get("until") or 0))
+    part = users[page * USERS_PAGE:(page + 1) * USERS_PAGE]
+    rows = []
+    for key, user in part:
+        st = billing.status(int(key))
+        mark = "👑" if st["admin"] else ("💎" if st["pro"] and not st["trial"] else "🎁" if st["pro"] else "🆓")
+        until = f" до {billing.until_text(st['until'])}" if st["pro"] and not st["admin"] else ""
+        rows.append([{"text": f"{mark} {user_title(key, user)}{until}", "callback_data": f"adm:u:{key}"}])
+    nav = []
+    if page > 0:
+        nav.append({"text": "◀️", "callback_data": f"adm:users:{page - 1}"})
+    if (page + 1) * USERS_PAGE < len(users):
+        nav.append({"text": "▶️", "callback_data": f"adm:users:{page + 1}"})
+    rows += [nav] if nav else []
+    rows.append([{"text": "⬅️ Админ-панель", "callback_data": "adm:home"}])
+    text = (f"👥 Пользователи ({len(users)}). 👑 админ · 💎 платный Pro · 🎁 пробный · 🆓 Free.\n"
+            "Нажми на человека — выдать или забрать Pro, вернуть оплату.")
+    return text, {"inline_keyboard": rows}
+
+
+def user_card(key):
+    key = int(key)
+    user = storage.get_user(key)
+    st = billing.status(key)
+    names = sorted({p["name"] for p in user.get("patterns", [])})
+    plan = ("👑 админ" if st["admin"] else
+            (("🎁 пробный Pro" if st["trial"] else "💎 Pro") + f" до {billing.until_text(st['until'])}, "
+             f"осталось {billing.days_left(st['until'])} дн." if st["pro"] else "🆓 Free"))
+    paid = billing.history(key)[:5]
+    lines = [f"👤 {user_title(key, user)} · ID {key}", f"Тариф: {plan}",
+             f"Паттерны: {', '.join(names) or '—'}",
+             f"Автоскан: {'вкл' if user.get('autoscan') else 'выкл'} · оценок 👍/👎: {len(user.get('feedback', []))}"]
+    if paid:
+        lines.append("Оплаты:")
+        lines += [f"• {time.strftime('%d.%m.%Y', time.localtime(p['at']))} {p['plan']} — "
+                  + (f"⭐ {p['amount']:.0f}" if p["currency"] == "XTR" else f"{p['amount']:.0f} ₽")
+                  + (" (возвращена)" if p.get("status") == "refunded" else "") for p in paid]
+    rows = [[{"text": "🎁 +30 дней Pro", "callback_data": f"adm:grant:{key}:30"},
+             {"text": "🎁 +365 дней", "callback_data": f"adm:grant:{key}:365"}],
+            [{"text": "⛔ Забрать Pro (сразу Free)", "callback_data": f"adm:revoke:{key}"}]]
+    if any(p["currency"] == "XTR" and p.get("status") != "refunded" for p in paid):
+        rows.append([{"text": "↩️ Вернуть последнюю оплату звёздами", "callback_data": f"adm:refund:{key}"}])
+    rows.append([{"text": "⬅️ Список", "callback_data": "adm:users:0"},
+                 {"text": "🛠 Панель", "callback_data": "adm:home"}])
+    return "\n".join(lines), {"inline_keyboard": rows}
+
+
+def admin_grant(admin_id, key, days):
+    until = billing.extend(key, days, source="admin")
+    send_message(f"🎁 Тебе выдан Pro до {billing.until_text(until)}.", key)
+    return f"✅ {user_title(key)}: Pro до {billing.until_text(until)}"
+
+
+def admin_refund(key):
+    """Вернуть последнюю (не возвращённую) оплату звёздами и снять Pro."""
+    stars = [p for p in billing.history(key) if p["currency"] == "XTR" and p.get("status") != "refunded"]
+    if not stars:
+        return "У него нет оплат звёздами, которые можно вернуть."
+    answer = api_post("refundStarPayment", {"user_id": int(key), "telegram_payment_charge_id": stars[0]["id"]})
+    if not answer.get("ok"):
+        return f"Не получилось вернуть: {answer.get('description', 'ошибка Telegram')}"
+    storage.set_payment_status(stars[0]["id"], "refunded")
+    billing.revoke(int(key))
+    return f"↩️ Вернул {stars[0]['amount']:.0f} ⭐ пользователю {user_title(key)}, Pro снят."
+
+
+def admin_callback(chat_id, message_id, value, media):
+    """Кнопки админ-панели (adm:…). Каждый раз проверяем, что нажал админ."""
+    if not billing.is_admin(chat_id):
+        return
+    parts = value.split(":")
+    action = parts[0]
+    if action == "home":
+        show_view(chat_id, message_id, admin_view(chat_id), media)
+    elif action == "users":
+        show_view(chat_id, message_id, users_view(int(parts[1] or 0)), media)
+    elif action == "u":
+        show_view(chat_id, message_id, user_card(parts[1]), media)
+    elif action == "grant":
+        text = admin_grant(chat_id, int(parts[1]), int(parts[2]))
+        show_view(chat_id, message_id, user_card(parts[1]), media)
+        send_message(text, chat_id)
+    elif action == "revoke":
+        billing.revoke(int(parts[1]))
+        show_view(chat_id, message_id, user_card(parts[1]), media)
+        send_message(f"⛔ {user_title(parts[1])}: Pro снят, теперь Free.", chat_id)
+    elif action == "refund":
+        send_message(f"Вернуть последнюю оплату звёздами пользователю {user_title(parts[1])} и снять Pro?", chat_id,
+                     {"inline_keyboard": [[{"text": "↩️ Да, вернуть", "callback_data": f"adm:refundok:{parts[1]}"},
+                                           {"text": "Отмена", "callback_data": "hide"}]]})
+    elif action == "refundok":
+        send_message(admin_refund(parts[1]), chat_id)
+    elif action == "backup":
+        path = storage.backup()
+        send_message(f"💾 Копия базы: {path}" if path else "Базы ещё нет.", chat_id)
+    elif action == "bc":
+        writing_broadcast.add(chat_id)
+        send_message("📣 Напиши следующим сообщением текст рассылки — я покажу, как он выглядит, и спрошу, "
+                     "отправлять ли всем.", chat_id, {"inline_keyboard": [[{"text": "Отмена", "callback_data": "adm:bcno"}]]})
+    elif action == "bcok":
+        text = broadcast_draft.pop(chat_id, None)
+        if text:
+            background(broadcast, chat_id, text)
+    elif action == "bcno":
+        writing_broadcast.discard(chat_id)
+        broadcast_draft.pop(chat_id, None)
+        send_message("Рассылка отменена.", chat_id)
+
+
+def draft_broadcast(chat_id, text):
+    broadcast_draft[chat_id] = text
+    count = len(storage.load_users())
+    send_message(f"Так увидят {count} пользователей:\n\n{text}", chat_id,
+                 {"inline_keyboard": [[{"text": f"✅ Отправить всем ({count})", "callback_data": "adm:bcok"},
+                                       {"text": "Отмена", "callback_data": "adm:bcno"}]]})
+
+
 def admin_command(chat_id, command, argument):
-    """Команды админа. True — команда админская (обработана)."""
-    if command not in ("/admin", "/grant", "/revoke", "/user", "/broadcast", "/backup", "/refund"):
+    """Команды админа. True — команда админская (обработана). Не админ — команды «не существует»."""
+    if command not in ("/admin", "/grant", "/revoke", "/user", "/broadcast", "/backup", "/refund", "/users"):
         return False
     if not billing.is_admin(chat_id):
         return False
     args = argument.split()
+    who = find_user_id(args[0]) if args else None
     if command == "/admin":
-        balance = stars_balance()
-        wallet = (f"\n⭐ На балансе бота: {balance} звёзд (вывод — в профиле бота в Telegram → Баланс)"
-                  if balance is not None else "")
-        send_message(billing.stats() + wallet + "\n\n" + ADMIN_HELP, chat_id)
-    elif command == "/refund" and args and args[0].lstrip("-").isdigit():
-        stars = [p for p in billing.history(args[0]) if p["currency"] == "XTR"]
-        if not stars:
-            send_message("У него нет оплат звёздами.", chat_id)
+        show_view(chat_id, None, admin_view(chat_id))
+    elif command == "/users" or (command in ("/user", "/grant", "/revoke", "/refund") and who is None):
+        if args:
+            send_message(f"Не нашёл пользователя {args[0]} — он должен хоть раз написать боту. Выбери из списка:",
+                         chat_id)
+        show_view(chat_id, None, users_view(0))         # без ID — список пользователей с кнопками
+    elif command == "/user":
+        show_view(chat_id, None, user_card(who))
+    elif command == "/grant":
+        days = int(args[1]) if len(args) > 1 and args[1].isdigit() else 30
+        send_message(admin_grant(chat_id, who, days), chat_id)
+    elif command == "/revoke":
+        billing.revoke(who)
+        send_message(f"⛔ {user_title(who)}: Pro снят, теперь Free.", chat_id)
+    elif command == "/refund":
+        send_message(admin_refund(who), chat_id)
+    elif command == "/broadcast":
+        if argument.strip():
+            draft_broadcast(chat_id, argument.strip())
         else:
-            answer = api_post("refundStarPayment", {"user_id": int(args[0]),
-                                                     "telegram_payment_charge_id": stars[0]["id"]})
-            if answer.get("ok"):
-                billing.revoke(int(args[0]))
-                send_message(f"↩️ Вернул {stars[0]['amount']:.0f} ⭐ пользователю {args[0]}, Pro снят.", chat_id)
-            else:
-                send_message(f"Не получилось вернуть: {answer.get('description', 'ошибка')}", chat_id)
-    elif command == "/grant" and len(args) == 2 and args[0].lstrip("-").isdigit() and args[1].isdigit():
-        until = billing.extend(int(args[0]), int(args[1]), source="admin")
-        send_message(f"✅ {args[0]}: Pro до {billing.until_text(until)}", chat_id)
-        send_message(f"🎁 Тебе выдан Pro до {billing.until_text(until)}.", int(args[0]))
-    elif command == "/revoke" and args and args[0].lstrip("-").isdigit():
-        billing.revoke(int(args[0]))
-        send_message(f"✅ {args[0]}: Pro снят", chat_id)
-    elif command == "/user" and args and args[0].lstrip("-").isdigit():
-        user = storage.get_user(args[0])
-        names = sorted({p["name"] for p in user.get("patterns", [])})
-        st = billing.status(int(args[0]))
-        send_message(f"👤 {args[0]}\nPro: {'да' if st['pro'] else 'нет'} до {billing.until_text(st['until'])} "
-                     f"({st['source']})\nПаттерны: {', '.join(names) or '—'}\n"
-                     f"Автоскан: {'вкл' if user.get('autoscan') else 'выкл'} · оценок: {len(user.get('feedback', []))}",
-                     chat_id)
-    elif command == "/broadcast" and argument.strip():
-        background(broadcast, chat_id, argument.strip())
+            admin_callback(chat_id, None, "bc", False)
     elif command == "/backup":
         path = storage.backup()
         send_message(f"💾 Копия базы: {path}" if path else "Базы ещё нет.", chat_id)
-    else:
-        send_message(ADMIN_HELP, chat_id)
     return True
 
 
@@ -506,12 +657,9 @@ def my_patterns_view(chat_id):
             + _grid([button(n) for n in SMC_PATTERNS])
             + [[TO_MENU]])
     if counts:
-        text = ("📂 Паттерны\n✅ — ищу (цифра — сколько твоих примеров): нажми, чтобы посмотреть, "
-                "добавить или удалить.\n➕ — ещё не ищу: нажми и пришли свой пример — буду искать "
-                "похожие на него.")
+        text = "📂 Паттерны\n✅ — ищу (цифра — твои примеры) · ➕ — добавить"
     else:
-        text = ("📂 Выбери паттерн и пришли скриншот своего примера — я буду искать на рынке "
-                "похожие именно на него. Нажми на любой ➕.")
+        text = "📂 Выбери паттерн (➕) и пришли скриншот своего примера — буду искать похожие."
     return text, {"inline_keyboard": rows}
 
 
@@ -522,11 +670,9 @@ def examples_of(chat_id, index):
 def example_title(p):
     """Короткое описание примера: откуда он и что на нём."""
     if p.get("note", "").startswith("с рынка"):
-        if p.get("fingerprint"):
-            return f"{p['note']}\n{describe_fingerprint(p['fingerprint'])}"
         return p["note"]
     if p.get("fingerprint"):
-        return f"скрин: {describe_fingerprint(p['fingerprint'])}"
+        return "твой скрин"
     if p.get("builtin"):
         return "без скриншота — " + ("встроенный эталон" if p["name"] in SHAPE_PATTERNS else "по правилам")
     if p.get("kind"):
@@ -633,11 +779,9 @@ def intro_view(chat_id, index):
     count = len(examples_of(chat_id, index))
     text = f"🧩 {name}\n\nКак ищу: {PATTERN_INFO[name]}\n\n"
     if count:
-        text += f"✅ Ищу. Твоих примеров: {count} — чем больше разных, тем точнее «похоже на твой пример»."
+        text += f"✅ Ищу. Твоих примеров: {count}."
     else:
-        text += ("📷 Пришли скриншот своего примера — буду искать на рынке ПОХОЖИЕ на него: "
-                 "у каждого трейдера свой «правильный» паттерн.\n"
-                 "Не знаешь, что сфотографировать? Открой «👀 Пример с рынка»: понравился — «💾 В мои примеры».")
+        text += "📷 Пришли скриншот своего примера — буду искать похожие. Нет примера? «👀 Пример с рынка»."
     rows = [[{"text": "📷 Прислать свой пример", "callback_data": f"shot:{index}"}],
             [{"text": "👀 Пример с рынка", "callback_data": f"demo:{index}"}]]
     if not count:
@@ -786,29 +930,19 @@ def save_demo(chat_id, index):
 # --- настройки (всё листается в одном сообщении) ----------------------------------------------------
 def settings_text(chat_id):
     tfs = ", ".join(i.upper() for i in get_intervals(chat_id))
-    return (f"⚙️ Настройки поиска\n"
-            f"Таймфреймы: {tfs}\n"
-            f"Монеты: топ-{get_coins(chat_id)} по объёму\n\n"
-            "🎯 Значимые FVG — импульсная свеча сломала структуру, дыра ≥ 0.75 ATR и объём выше "
-            "обычного; зона отработана, когда свеча закрылась за её серединой. "
-            "«Все» — любая дыра больше 0.5 ATR. (Действует, только когда строгость отбора «выкл»: "
-            "иначе каждый FVG оценивает эксперт.)\n"
-            "🧩 Только комбинации — монеты, где одновременно нашлось 2+ твоих паттерна.\n"
-            "🖼 Только похожие на мой пример — треугольники, клинья и каналы, похожие на твой "
-            "рисунок (наклон линий, сужение, путь цены).\n"
-            "🎯 Учитывать мои оценки — по твоим 👍/👎 подстраиваю, какие критерии паттерна для тебя "
-            "важнее и насколько строго отбирать.\n"
-            "🔗 Только совпадения ТФ — монеты, где находки разных таймфреймов подтверждают "
-            "друг друга. Нужно выбрать хотя бы 2 таймфрейма.\n"
-            "📊 Эталонные OB / Breaker — свеча блока сняла ликвидность (прошлый свинг), сразу после неё "
-            "резкая противоположная свеча закрылась за её тенью, и объём повышен (≥ 1.5× среднего).\n"
-            "🧠 Строгость отбора — каждую находку оценивает эксперт по критериям ТА и Smart Money "
-            "(импульс, снятие ликвидности, имбаланс, слом структуры, объём, дисконт/премиум, "
-            "тренд, свежесть зоны…). «Обычная» не присылает слабые, «строгая» — только сильные, "
-            "«выкл» — всё по правилам.\n\n"
-            f"🧠 Сравнение с твоими примерами «на вид»: {visual.EYE['name']}"
-            + ("" if visual.EYE["name"] != "HOG" else " (нейросеть ставится командой  python setup_ai.py)")
-            + "\n🧠 Значимость по истории рынка: " + quality_status())
+    return f"⚙️ Настройки\nТаймфреймы: {tfs} · топ-{get_coins(chat_id)} монет\n\nНажми, чтобы изменить."
+
+
+SETTINGS_HELP = (
+    "❓ Что значат настройки:\n"
+    "🎯 FVG — только сильные или все\n"
+    "🧩 Комбинации — только монеты, где нашлось 2+ паттерна\n"
+    "🖼 Похожие на пример — только похожие на твои скрины\n"
+    "🎯 Оценки 👍/👎 — подстраиваюсь под твой вкус\n"
+    "🔗 Совпадения ТФ — только когда разные таймфреймы подтверждают друг друга\n"
+    "📊 Эталонные OB — только блоки со снятием ликвидности и объёмом\n"
+    "🧠 Строгость — сколько слабых находок отсеивать"
+)
 
 
 QUALITY_NAMES = {"normal": "обычная", "strict": "строгая", "off": "выкл"}
@@ -837,7 +971,7 @@ def settings_keyboard(chat_id):
         [{"text": f"📊 OB / Breaker только эталонные: {yes('ob_volume')}", "callback_data": "set:ob_volume"}],
         [{"text": f"🧠 Строгость отбора: {QUALITY_NAMES.get(settings.get('quality', 'normal'), 'обычная')}",
           "callback_data": "set:quality"}],
-        [TO_MENU],
+        [{"text": "❓ Что это значит", "callback_data": "sethelp"}, TO_MENU],
     ]}
 
 
@@ -895,16 +1029,11 @@ def drawn_levels(path):
 
 
 DESCRIBE_TEXT = (
-    "✏️ Опиши словами, каким должен быть ТВОЙ паттерн — как объяснил бы другу-трейдеру. "
-    "Я переведу описание в условия и буду искать на рынке именно такой.\n\n"
-    "Можно писать: что ОБЯЗАТЕЛЬНО («должен снять ликвидность», «только с объёмом»), "
-    "что ЖЕЛАТЕЛЬНО («лучше в дисконте»), что НЕЛЬЗЯ («без FVG», «не тестировался»), "
-    "таймфреймы («4H и 1D»), направление («бычий»), связки («FVG внутри OB», «после BOS», "
-    "«у равных лоёв»), числа («от 3 касаний»).\n\n"
-    "Например: «бычий OB на 4H, обязательно снял ликвидность под лоями, с объёмом, сразу поглощение, "
-    "желательно в дисконте, не тестировался».\n\n"
-    "Подсказка: описание можно писать и прямо в подписи к скриншоту.")
-BRAIN_TIP = ("\n\n🧠 На этом ПК стоит моя нейросеть — пиши как хочешь, своими словами и сленгом, я пойму.")
+    "✏️ Опиши словами, каким должен быть твой паттерн — как другу-трейдеру.\n\n"
+    "Например: «бычий OB на 4H, обязательно снял ликвидность, с объёмом, желательно в дисконте, "
+    "без FVG»."
+)
+BRAIN_TIP = "\n\n🧠 Пиши как удобно, своими словами и сленгом — я пойму."
 
 
 def example_keyboard(pattern_id):
@@ -1081,17 +1210,13 @@ def receive_example(chat_id, name, path):
     debug_path = f"{PATTERNS_DIR}/{chat_id}_debug.png"
     with chart_lock:
         plot_example(candles, "", "", item, debug_path, f"Что я увидел на твоём скрине: {name}", dates=False)
-    volume = "" if "volume" in candles else "\n(объёма на скрине не видно — сравниваю без него)"
     drawn = ("• нашёл твой прямоугольник" + (" и линию POC" if drawn_box.get("poc") is not None else "")
              + " — границы боковика беру с него\n") if drawn_box is not None else (
         "• нашёл закрашенную тобой зону — паттерн беру по ней\n" if zones else
         "• нашёл твою разметку линиями — паттерн беру по ней\n" if item and item.get("from_line") else "")
-    caption = (f"Вот что я увидел на твоём скрине ({len(candles)} свечей):\n{drawn}"
-               f"• {kind_text(item)}\n"
-               f"• отпечаток: {describe_fingerprint(fp)}{volume}\n"
+    caption = (f"Вот что я увидел на твоём скрине:\n• {kind_text(item)}\n{drawn}"
                f"{understood}\n"
-               "На рынке буду искать ПОХОЖИЕ на этот пример. "
-               "Я правильно нашёл паттерн?")
+               "Буду искать похожие. Я правильно нашёл паттерн?")
     keyboard = example_keyboard(pattern_id)
     send_photo(debug_path, caption[:CAPTION_LIMIT], chat_id, keyboard)
     remove_file(debug_path)
@@ -1224,7 +1349,15 @@ def handle_message(message):
     if "successful_payment" in message:
         handle_payment(message)
         return
+    if "refunded_payment" in message:
+        handle_refunded(message)
+        return
+    remember_username(message)
     chat_id = message["chat"]["id"]
+    if chat_id in writing_broadcast and message.get("text") and not message["text"].startswith("/"):
+        writing_broadcast.discard(chat_id)
+        draft_broadcast(chat_id, message["text"])
+        return
     text = message.get("text", "").strip()
     if first_visit(chat_id) and not text.startswith(("/start", "/help")):
         send_welcome(chat_id)                          # новичку — сначала объяснение
@@ -1781,8 +1914,7 @@ def send_details(chat_id, card_id, reply_to=None):
 
 # --- поиск монеты ---------------------------------------------------------------------------------
 FIND_BUTTONS = 12
-FIND_TEXT = ("🔎 Напиши тикер монеты, например SOL, WLD или PEPEUSDT.\n"
-             "Сначала ищу в последних результатах, а если её там нет — проверю её прямо сейчас.")
+FIND_TEXT = "🔎 Напиши тикер монеты, например SOL или PEPE."
 
 
 def stored_coins(chat_id):
@@ -1947,6 +2079,10 @@ def handle_callback(query):
     if data == "noop":
         return
 
+    if data.startswith("adm:"):
+        admin_callback(chat_id, message_id, data[4:], media)
+        return
+
     if data == "home":                                  # меню внизу чата, сообщение с кнопкой остаётся
         show_menu(chat_id)
         return
@@ -2021,9 +2157,14 @@ def handle_callback(query):
         show_view(chat_id, message_id, (WELCOME, WELCOME_KEYBOARD), media)
         return
 
+    if data == "sethelp":
+        send_message(SETTINGS_HELP, chat_id, {"inline_keyboard": [[CLOSE]]})
+        return
+
     if data == "pinehelp":
         send_message(PINE_HOWTO, chat_id, {"inline_keyboard": [[CLOSE, HOME]]})
         return
+
 
     action, _, value = data.partition(":")
 

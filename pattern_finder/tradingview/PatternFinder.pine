@@ -1,0 +1,161 @@
+//@version=6
+// Pattern Finder — разметка паттернов от Telegram-бота Pattern Finder.
+// Добавь индикатор на график ОДИН раз. Дальше бот присылает короткий код:
+// нажми на код в сообщении (он скопируется) → шестерёнка индикатора → поле «Код от бота» → вставить → ОК.
+// Рисуется то же, что раньше рисовал файл .pine: фигуры, зоны, уровни, история, панель-сводка.
+indicator("Pattern Finder", overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
+
+code1 = input.text_area("", "Код от бота", group="Код разметки", tooltip="Нажми на код в сообщении бота — он скопируется. Вставь сюда и нажми ОК.")
+code2 = input.text_area("", "Часть 2 (если бот прислал)", group="Код разметки")
+code3 = input.text_area("", "Часть 3 (если бот прислал)", group="Код разметки")
+show_table = input.bool(true, "Панель-сводка", group="Что показывать")
+show_figures = input.bool(true, "Фигуры (треугольник, клин, канал, формы)", group="Что показывать")
+show_zones = input.bool(true, "Зоны (FVG, Order / Breaker / Mitigation)", group="Что показывать")
+show_levels = input.bool(true, "Уровни (BOS / CHoCH, EQH / EQL)", group="Что показывать")
+history_mode = input.string("Как прислал бот", "Прошлые случаи (история)", options=["Как прислал бот", "Показать", "Скрыть"], group="Что показывать")
+only_higher = input.bool(true, "Только ТФ не ниже графика", group="Таймфреймы")
+show_1h = input.bool(true, "1H", group="Таймфреймы")
+show_4h = input.bool(true, "4H", group="Таймфреймы")
+show_12h = input.bool(true, "12H", group="Таймфреймы")
+show_1d = input.bool(true, "1D", group="Таймфреймы")
+show_1w = input.bool(true, "1W", group="Таймфреймы")
+
+DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+// число из 36-ричной записи («-» в начале — отрицательное)
+b36(string s) =>
+    bool neg = str.startswith(s, "-")
+    string t = neg ? str.substring(s, 1) : s
+    float v = 0.0
+    int n = str.length(t)
+    if n > 0
+        for i = 0 to n - 1
+            v := v * 36 + nz(str.pos(DIGITS, str.substring(t, i, i + 1)))
+    neg ? -v : v
+
+xt(float t0, string s) =>
+    int((t0 + b36(s)) * 1000)
+
+py(float p0, string s) =>
+    p0 * b36(s) / 100000
+
+base_color(string c) =>
+    switch c
+        "g" => color.green
+        "r" => color.red
+        "o" => color.orange
+        "b" => color.blue
+        "p" => color.purple
+        "y" => color.gray
+        "w" => color.white
+        => color.black
+
+col(string c) =>
+    float a = str.length(c) > 1 ? str.tonumber(str.substring(c, 1)) : 0.0
+    color.new(base_color(str.substring(c, 0, 1)), a)
+
+lstyle(string s) =>
+    s == "d" ? line.style_dashed : s == "t" ? line.style_dotted : line.style_solid
+
+xext(string s) =>
+    s == "r" ? extend.right : extend.none
+
+tstyle(string s) =>
+    switch s
+        "c" => label.style_label_center
+        "u" => label.style_label_up
+        "d" => label.style_label_down
+        "w" => label.style_label_lower_left
+        => label.style_label_left
+
+tsize(string s) =>
+    s == "t" ? size.tiny : size.small
+
+txt(string s) =>
+    s == "_" ? "" : s
+
+tf_seconds(string tf) =>
+    switch tf
+        "1h" => 3600
+        "4h" => 14400
+        "12h" => 43200
+        "1d" => 86400
+        => 604800
+
+tf_on(string tf) =>
+    switch tf
+        "1h" => show_1h
+        "4h" => show_4h
+        "12h" => show_12h
+        "1d" => show_1d
+        => show_1w
+
+CLEAR = color.new(color.black, 100)
+data = code1 + code2 + code3
+
+if barstate.islast
+    if str.length(data) == 0
+        label.new(bar_index, high, "Pattern Finder: вставь код от бота — шестерёнка индикатора → «Код от бота»", color=CLEAR, textcolor=color.gray, style=label.style_label_down)
+    else
+        recs = str.split(data, "|")
+        hdr = str.split(array.get(recs, 0), ",")
+        if array.size(hdr) < 6 or array.get(hdr, 0) != "PF1"
+            label.new(bar_index, high, "Pattern Finder: код не распознан — скопируй его из бота заново", color=CLEAR, textcolor=color.red, style=label.style_label_down)
+        else
+            sym = array.get(hdr, 1)
+            t0 = b36(array.get(hdr, 2))
+            p0 = str.tonumber(array.get(hdr, 3))
+            show_hist = history_mode == "Показать" ? true : history_mode == "Скрыть" ? false : array.get(hdr, 4) == "1"
+            tfs = str.split(array.get(hdr, 5), ".")
+            multi = array.size(tfs) > 1
+            chart_seconds = timeframe.in_seconds()
+            if not str.contains(syminfo.ticker, sym)
+                label.new(bar_index, high, "⚠️ Этот код для " + sym + ", а открыт график " + syminfo.ticker, color=CLEAR, textcolor=color.red, style=label.style_label_down)
+            row_tf = array.new<string>()
+            row_trend = array.new<string>()
+            row_found = array.new<string>()
+            int total = 0
+            int nrec = array.size(recs)
+            if nrec > 1
+                for i = 1 to nrec - 1
+                    f = str.split(array.get(recs, i), ",")
+                    kind = array.get(f, 0)
+                    if kind == "S" and array.size(f) >= 4
+                        array.push(row_tf, array.get(f, 1))
+                        array.push(row_trend, array.get(f, 2))
+                        array.push(row_found, array.get(f, 3))
+                    else if array.size(f) >= 6
+                        total += 1
+                        tf = array.get(tfs, int(str.tonumber(array.get(f, 1))))
+                        layer = array.get(f, 2)
+                        cat = array.get(f, 3)
+                        cat_on = cat == "f" ? show_figures : cat == "z" ? show_zones : show_levels
+                        tf_ok = not multi or (tf_on(tf) and (not only_higher or chart_seconds <= tf_seconds(tf)))
+                        if cat_on and tf_ok and (layer != "p" or show_hist)
+                            if kind == "L" and array.size(f) >= 12
+                                line.new(xt(t0, array.get(f, 4)), py(p0, array.get(f, 5)), xt(t0, array.get(f, 6)), py(p0, array.get(f, 7)), xloc=xloc.bar_time, extend=xext(array.get(f, 11)), color=col(array.get(f, 8)), width=int(str.tonumber(array.get(f, 9))), style=lstyle(array.get(f, 10)))
+                            else if kind == "B" and array.size(f) >= 13
+                                c = array.get(f, 8)
+                                bc = base_color(str.substring(c, 0, 1))
+                                box.new(xt(t0, array.get(f, 4)), py(p0, array.get(f, 5)), xt(t0, array.get(f, 6)), py(p0, array.get(f, 7)), xloc=xloc.bar_time, extend=xext(array.get(f, 10)), border_color=color.new(bc, 70), border_style=lstyle(array.get(f, 11)), bgcolor=color.new(bc, str.tonumber(array.get(f, 9))), text=txt(array.get(f, 12)), text_size=size.tiny, text_color=col(c), text_halign=text.align_right, text_valign=text.align_top)
+                            else if kind == "T" and array.size(f) >= 10
+                                label.new(xt(t0, array.get(f, 4)), py(p0, array.get(f, 5)), txt(array.get(f, 6)), xloc=xloc.bar_time, style=tstyle(array.get(f, 8)), color=CLEAR, textcolor=col(array.get(f, 7)), size=tsize(array.get(f, 9)))
+                            else if kind == "D" and array.size(f) > 6
+                                for j = 6 to array.size(f) - 1
+                                    xy = str.split(array.get(f, j), ":")
+                                    if array.size(xy) == 2
+                                        label.new(xt(t0, array.get(xy, 0)), py(p0, array.get(xy, 1)), "●", xloc=xloc.bar_time, style=label.style_label_center, color=CLEAR, textcolor=col(array.get(f, 4)), size=tsize(array.get(f, 5)))
+            if total == 0
+                label.new(bar_index, high, "Паттерны не найдены", color=CLEAR, textcolor=color.gray, style=label.style_label_down)
+            nrows = array.size(row_tf)
+            if show_table and nrows > 0
+                tbl = table.new(position.top_right, 3, nrows + 1, bgcolor=color.new(color.black, 25), border_width=1, border_color=color.new(color.gray, 70))
+                table.cell(tbl, 0, 0, "ТФ", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+                table.cell(tbl, 1, 0, "Тренд", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+                table.cell(tbl, 2, 0, "Сейчас найдено", text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+                for r = 0 to nrows - 1
+                    tr = array.get(row_trend, r)
+                    tcol = str.startswith(tr, "↑") ? color.green : str.startswith(tr, "↓") ? color.red : color.white
+                    table.cell(tbl, 0, r + 1, str.upper(array.get(row_tf, r)), text_color=color.white, text_size=size.small, text_halign=text.align_left)
+                    table.cell(tbl, 1, r + 1, tr, text_color=tcol, text_size=size.small, text_halign=text.align_left)
+                    table.cell(tbl, 2, r + 1, array.get(row_found, r), text_color=color.white, text_size=size.small, text_halign=text.align_left)

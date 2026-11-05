@@ -6,3 +6,4 @@ matplotlib
 pillow
 opencv-python-headless
 pytest
+scikit-learn
