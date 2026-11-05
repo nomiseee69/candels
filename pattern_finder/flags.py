@@ -158,15 +158,17 @@ def _arrays(df):
 
 
 def _label(found, breakout=None):
-    text = (f"{NAMES[found['kind']]}: флагшток {found['pole_move']:+.1%} за "
-            f"{found['pole'][2] - found['pole'][0]} свечей, откат {found['retrace']:.0%}")
+    retrace = found["retrace"]
+    depth = "неглубокий" if retrace < 0.38 else "средний" if retrace < 0.62 else "глубокий"
+    text = (f"{NAMES[found['kind']]}: флагшток {'вверх' if found['pole_move'] > 0 else 'вниз'} за "
+            f"{found['pole'][2] - found['pole'][0]} свечей, откат {depth}")
     if breakout:
         text += ", выход " + ("вверх" if breakout == "up" else "вниз")
     found["label"] = text
     return found
 
 
-def find_flag(df, shape):
+def find_flag(df, shape, extra=None):
     """Флаг (shape="flag") или вымпел ("pennant"), который формируется прямо сейчас:
     тело кончается на последних свечах, цена ещё внутри (или только что вышла по флагштоку)."""
     n = len(df)
@@ -189,7 +191,8 @@ def find_flag(df, shape):
             if back > 0 and breakout != found["direction"]:
                 continue                                      # вышли против флагштока — фигура сломана
             found["window"] = n - found["start"]
-            rank = (found["score"], body, -back)
+            bonus = extra(df, {**found, "breakout": breakout}) if extra else 0     # описание словами
+            rank = (bonus, found["score"], body, -back)
             if best is None or rank > best[0]:
                 best = (rank, _label(found, breakout))
             break

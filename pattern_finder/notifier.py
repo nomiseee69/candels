@@ -11,6 +11,20 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 API = f"https://api.telegram.org/bot{TOKEN}"
 
+# Все запросы к Telegram — через одну «сессию». Если api.telegram.org у тебя не открывается
+# (провайдер блокирует), впиши в .env прокси:  TELEGRAM_PROXY=http://адрес:порт
+# (для socks5://… нужен ещё  pip install "requests[socks]").
+HTTP = requests.Session()
+PROXY = os.getenv("TELEGRAM_PROXY")
+if PROXY:
+    HTTP.proxies = {"https": PROXY, "http": PROXY}
+
+
+def safe_error(error):
+    """Текст ошибки сети БЕЗ токена бота: токен — пароль от бота, его нельзя показывать в логах."""
+    text = str(error)
+    return text.replace(TOKEN, "***") if TOKEN else text
+
 TV_INTERVALS = {"1h": "60", "4h": "240", "12h": "720", "1d": "D", "1w": "W"}
 
 
@@ -37,7 +51,7 @@ def _message_id(response):
 def send_message(text, chat_id=CHAT_ID, keyboard=None, reply_to=None):
     """Отправляет текст. Возвращает номер сообщения или None."""
     data = _reply(_with_keyboard({"chat_id": chat_id, "text": text}, keyboard), reply_to)
-    response = requests.post(f"{API}/sendMessage", data=data, timeout=10)
+    response = HTTP.post(f"{API}/sendMessage", data=data, timeout=10)
     return _message_id(response)
 
 
@@ -46,32 +60,32 @@ def edit_photo(chat_id, message_id, path, caption, keyboard=None):
     media = {"type": "photo", "media": "attach://photo", "caption": caption}
     data = _with_keyboard({"chat_id": chat_id, "message_id": message_id, "media": json.dumps(media)}, keyboard)
     with open(path, "rb") as photo:
-        response = requests.post(f"{API}/editMessageMedia", data=data, files={"photo": photo}, timeout=30)
+        response = HTTP.post(f"{API}/editMessageMedia", data=data, files={"photo": photo}, timeout=30)
     return response.status_code == 200
 
 
 def delete_message(chat_id, message_id):
-    requests.post(f"{API}/deleteMessage", data={"chat_id": chat_id, "message_id": message_id}, timeout=10)
+    HTTP.post(f"{API}/deleteMessage", data={"chat_id": chat_id, "message_id": message_id}, timeout=10)
 
 
 def edit_message(chat_id, message_id, text, keyboard=None):
     """Меняет текст и кнопки уже отправленного сообщения — меню листается на месте,
     без новых сообщений в чате."""
     data = _with_keyboard({"chat_id": chat_id, "message_id": message_id, "text": text}, keyboard)
-    response = requests.post(f"{API}/editMessageText", data=data, timeout=10)
+    response = HTTP.post(f"{API}/editMessageText", data=data, timeout=10)
     return response.status_code == 200
 
 
 def send_action(chat_id, action="upload_document"):
     """Статус «отправляет файл…» вверху чата, пока бот готовит ответ."""
-    requests.post(f"{API}/sendChatAction", data={"chat_id": chat_id, "action": action}, timeout=10)
+    HTTP.post(f"{API}/sendChatAction", data={"chat_id": chat_id, "action": action}, timeout=10)
 
 
 def send_photo(path, caption, chat_id=CHAT_ID, keyboard=None):
     """Отправляет картинку. Возвращает номер сообщения или None."""
     data = _with_keyboard({"chat_id": chat_id, "caption": caption}, keyboard)
     with open(path, "rb") as photo:
-        response = requests.post(f"{API}/sendPhoto", data=data, files={"photo": photo}, timeout=30)
+        response = HTTP.post(f"{API}/sendPhoto", data=data, files={"photo": photo}, timeout=30)
     return _message_id(response)
 
 
@@ -79,7 +93,7 @@ def send_document(path, caption, chat_id=CHAT_ID, filename=None, keyboard=None, 
     """Файл, который пользователь скачает (например, скрипт для TradingView)."""
     data = _reply(_with_keyboard({"chat_id": chat_id, "caption": caption}, keyboard), reply_to)
     with open(path, "rb") as f:
-        response = requests.post(
+        response = HTTP.post(
             f"{API}/sendDocument",
             data=data,
             files={"document": (filename or os.path.basename(path), f)},
@@ -90,7 +104,7 @@ def send_document(path, caption, chat_id=CHAT_ID, filename=None, keyboard=None, 
 
 def edit_keyboard(chat_id, message_id, keyboard):
     """Меняет кнопки под уже отправленным сообщением (галочки таймфреймов)."""
-    requests.post(
+    HTTP.post(
         f"{API}/editMessageReplyMarkup",
         data={"chat_id": chat_id, "message_id": message_id, "reply_markup": json.dumps(keyboard)},
         timeout=10,
@@ -100,11 +114,27 @@ def edit_keyboard(chat_id, message_id, keyboard):
 def set_commands(commands):
     """Список команд в меню «/» Telegram: [(команда, описание)]."""
     data = {"commands": json.dumps([{"command": c, "description": d} for c, d in commands])}
-    requests.post(f"{API}/setMyCommands", data=data, timeout=10)
+    HTTP.post(f"{API}/setMyCommands", data=data, timeout=10)
+
+
+def api_post(method, data, timeout=15):
+    """Любой метод Bot API → ответ JSON ({"ok": …, "result": …})."""
+    try:
+        return HTTP.post(f"{API}/{method}", data=data, timeout=timeout).json()
+    except (requests.RequestException, ValueError) as error:
+        print(f"Telegram {method}: {safe_error(error)[:200]}")
+        return {"ok": False}
+
+
+def answer_pre_checkout(query_id, ok=True, error=None):
+    data = {"pre_checkout_query_id": query_id, "ok": "true" if ok else "false"}
+    if error:
+        data["error_message"] = error
+    return api_post("answerPreCheckoutQuery", data)
 
 
 def answer_callback(callback_id):
-    requests.post(f"{API}/answerCallbackQuery", data={"callback_query_id": callback_id}, timeout=10)
+    HTTP.post(f"{API}/answerCallbackQuery", data={"callback_query_id": callback_id}, timeout=10)
 
 
 def tradingview_link(symbol, interval):

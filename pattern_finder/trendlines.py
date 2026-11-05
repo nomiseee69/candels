@@ -16,6 +16,8 @@ FLAT_SLOPE = 0.15           # наклон за всё окно меньше 15%
 FLAT_ANGLE = 4              # на рисунке: наклон меньше 4° — горизонталь
 CONVERGE_RATIO = 0.7        # к концу расстояние между линиями сжалось хотя бы на 30%
 PARALLEL_RATIO = (0.8, 1.25)
+CHANNEL_TOUCHES = 5         # канал: всего не меньше 5 касаний (2 + 3), по 2 на линию — MIN_PIVOTS
+CHANNEL_VIOLATIONS = 2      # и не больше 2 закрытий / проколов за линиями
 MIN_SPAN = 0.4              # касания разнесены хотя бы на 40% окна
 BREAKOUT_TOLERANCE = 0.01   # цена может выйти за линию на 1% — ещё внутри фигуры
 WINDOWS = (30, 50, 80, 120, 180, 250, 350, 500, 700)
@@ -79,9 +81,14 @@ def kind_from_drawing(lines):
     top, bottom = (a, b) if a.y_at(left) < b.y_at(left) else (b, a)
     gap_start = bottom.y_at(left) - top.y_at(left)
     gap_end = bottom.y_at(right) - top.y_at(right)
+    if gap_start <= 0:
+        return None
+    # наклон — как на рынке: насколько линия поднялась за фигуру относительно её высоты
+    # (а не в градусах: градусы зависят от того, как сжат скрин по ширине)
+    rise = lambda ln: (ln.y_at(left) - ln.y_at(right)) / gap_start      # y вниз — переворачиваем
     return classify(
-        _direction(top.angle, FLAT_ANGLE),
-        _direction(bottom.angle, FLAT_ANGLE),
+        _direction(rise(top), FLAT_SLOPE),
+        _direction(rise(bottom), FLAT_SLOPE),
         gap_start,
         gap_end,
     )
@@ -196,6 +203,11 @@ def _analyze_window(highs, lows, closes=None):
     )
     if kind is None:
         return None
+    # канал — две ПАРАЛЛЕЛЬНЫЕ линии, по которым цена ходит туда-обратно: на каждой нужно
+    # хотя бы 2, на одной из них — 3, и почти без закрытий за линиями (иначе это просто наклон)
+    if kind.startswith("channel") and (up["touches"] + lo["touches"] < CHANNEL_TOUCHES
+                                       or up["violations"] + lo["violations"] > CHANNEL_VIOLATIONS):
+        return None
 
     touches = up["touches"] + lo["touches"]
     violations = up["violations"] + lo["violations"]
@@ -245,13 +257,14 @@ def _still_inside(found, last_close):
 SIMILARITY_WEIGHT = 0.3     # насколько похожесть на пример пользователя влияет на выбор окна
 
 
-def find_line_pattern(df, family, preferred=None, windows=WINDOWS, similarity=None):
+def find_line_pattern(df, family, preferred=None, windows=WINDOWS, similarity=None, extra=None):
     """Лучшая фигура нужного семейства, которая формируется прямо сейчас (или None).
 
     family — набор типов (TRIANGLES, WEDGES, CHANNELS);
     preferred — тип с рисунка пользователя: совпадение повышает оценку;
     similarity — функция (df, фигура) → похожесть на пример пользователя 0..1 или None:
-    из нескольких окон выбирается фигура, больше похожая на его рисунок.
+    из нескольких окон выбирается фигура, больше похожая на его рисунок;
+    extra — функция (df, фигура) → добавка к выбору (описание словами: подходящая фигура главнее).
     """
     highs_all = df["high"].tolist()
     lows_all = df["low"].tolist()
@@ -275,7 +288,8 @@ def find_line_pattern(df, family, preferred=None, windows=WINDOWS, similarity=No
             found["similarity"] = similarity(df, found)
         # при почти равной оценке лучше длинное окно — оно захватывает фигуру целиком
         found["_rank"] = (found["score"] + 0.0005 * found["window"]
-                          + SIMILARITY_WEIGHT * (found.get("similarity") or 0))
+                          + SIMILARITY_WEIGHT * (found.get("similarity") or 0)
+                          + (extra(df, found) if extra is not None else 0))
         if best is None or found["_rank"] > best["_rank"]:
             best = found
     if best is not None:

@@ -1,8 +1,18 @@
+# Не отправлять на GitHub: секреты, данные пользователей, большие модели
+.env
+users.json
+users.json.migrated
+users.db
+users.db-*
+backups/
+patterns/
+models/
+*.gguf
+*.onnx
+*.npz
+ai.json
+brain.json
+pine_*.txt
+demo_*.png
 .venv/
 __pycache__/
-*.png
-.env
-user_*.jpg
-users.json
-patterns/
-!tests/samples/*.png

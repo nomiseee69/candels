@@ -7,15 +7,17 @@ FVG (Fair Value Gap, имбаланс) — «дыра» в цене из трё�
 работают как уровни — и свежие, и старые.
 
 Значимый FVG — не любая дыра, а след крупного игрока. Нужны ВСЕ условия:
-  1) средняя свеча — импульс: тело ≥ 1 ATR и занимает ≥ 60% свечи (displacement);
-  2) импульс сломал структуру (BOS/CHoCH) — сразу или в 3 свечах после;
-  3) дыра не мелкая: ≥ 0.75 ATR;
-  4) на импульсе был объём: ≥ 1.2× среднего за 20 свечей (неликвидные часы отсеиваются).
+  1) средняя свеча — импульс: тело ≥ 1 ATR и занимает ≥ 55% свечи (displacement);
+  2) импульс сломал структуру (BOS/CHoCH) — сразу или в 5 свечах после;
+  3) дыра не мелкая: ≥ 0.6 ATR;
+  4) на импульсе был объём: ≥ 1.1× среднего за 20 свечей (неликвидные часы отсеиваются).
 Отработка значимого FVG — свеча ЗАКРЫЛАСЬ за его серединой (50%, consequent encroachment):
 после этого зона считается использованной, даже если до конца её не закрыли.
 """
 
 import numpy as np
+
+from texts import where_text
 
 from structure import atr, structure_events
 
@@ -25,11 +27,12 @@ LOOKBACK = 30              # свежий FVG: образовался за по�
 OLD_LOOKBACK = 1000        # старый незакрытый FVG интересен, только если цена рядом (любой давности)
 NEAR_PRICE = 0.01          # «рядом» = не дальше 1% от зоны
 MAX_FILLED = 0.99          # заполнен на 100% — закрыт
+MITIGATED = 0.5            # цена дошла (хотя бы тенью) до середины дыры — FVG отработан
 IMPULSE_BODY_ATR = 1.0     # тело импульсной свечи ≥ 1 ATR
-IMPULSE_BODY_SHARE = 0.6   # и тело ≥ 60% всей свечи (маленькие тени)
-SIGNIFICANT_GAP_ATR = 0.75 # значимая дыра ≥ 0.75 ATR
-VOLUME_MIN = 1.2           # объём импульса ≥ 1.2× среднего за 20 свечей
-BREAK_REACH = 3            # слом структуры засчитываем, если он на импульсе или в 3 свечах после
+IMPULSE_BODY_SHARE = 0.55  # и тело ≥ 55% всей свечи (маленькие тени)
+SIGNIFICANT_GAP_ATR = 0.6  # значимая дыра ≥ 0.6 ATR
+VOLUME_MIN = 1.1           # объём импульса ≥ 1.1× среднего за 20 свечей
+BREAK_REACH = 5            # слом структуры засчитываем, если он на импульсе или в 5 свечах после
 
 FVG_NAMES = {"bullish_fvg": "бычий FVG", "bearish_fvg": "медвежий FVG"}
 
@@ -106,19 +109,20 @@ def find_all_fvg(df, lookback=LOOKBACK, include_filled=False, significant_only=F
         closed = np.where(depth >= MAX_FILLED)[0]
         filled_at = int(third + 1 + closed[0]) if len(closed) else None
         worked_out = False
-        if significant_only:                                # отработан: закрытие за серединой
-            ce = np.flatnonzero(beyond_middle)
-            if len(ce) and (filled_at is None or third + 1 + ce[0] < filled_at):
-                filled_at, worked_out = int(third + 1 + ce[0]), True
+        # отработан: цена дошла до середины дыры (тенью — этого достаточно, вход уже был)
+        # или закрылась за серединой
+        ce = np.flatnonzero((depth >= MITIGATED) | beyond_middle)
+        if len(ce) and (filled_at is None or third + 1 + ce[0] < filled_at):
+            filled_at, worked_out = int(third + 1 + ce[0]), True
         if filled_at is not None and not include_filled:
             continue
 
         distance = 0.0 if bottom <= last <= top else min(abs(last - bottom), abs(last - top)) / last
         if filled_at is None:
-            status = f"заполнен на {filled:.0%}"
+            status = "не заполнен" if filled < 0.05 else "частично заполнен"
         else:
-            status = "отработан (закрытие за серединой)" if worked_out else "закрыт"
-        where = "цена внутри зоны" if distance == 0 else f"до зоны {distance:.1%}"
+            status = "отработан (цена дошла до середины)" if worked_out else "закрыт"
+        where = where_text(distance, "цена внутри зоны")
         tags = f" ({', '.join(reasons)})" if significant else ""
         score = 0.7 + 0.3 * min(1.0, gap / size_atr)
         if significant:

@@ -143,9 +143,9 @@ def test_close_beyond_middle_works_out_significant_fvg():
               if f["kind"] == "bullish_fvg"]
     assert strict and strict[0]["filled_at"] == 29 and "отработан" in strict[0]["label"]
     assert find_fvg(df, significant_only=True) is None or find_fvg(df, significant_only=True)["kind"] != "bullish_fvg"
-    # в режиме «все» зона ещё открыта: до низа 100.4 цена не дошла
-    loose = [f for f in find_all_fvg(df) if f["kind"] == "bullish_fvg"]
-    assert loose and loose[0]["filled_at"] is None
+    # и в режиме «все»: цена дошла до середины — зона отработана, хоть до низа 100.4 и не дошла
+    loose = [f for f in find_all_fvg(df, include_filled=True) if f["kind"] == "bullish_fvg"]
+    assert loose and loose[0]["filled_at"] == 29
 
 
 def test_impulse_breaking_structure_is_significant():
@@ -191,12 +191,12 @@ def test_scanner_finds_choch_and_combos_only():
     raw = [raw[0]] * (120 - len(raw)) + raw if len(raw) < 120 else raw     # минимум свечей для поиска
     fetch = lambda s, i, n: raw
     patterns = [{"name": "CHoCH"}, {"name": "BOS"}]
-    cards, skipped = scanner.scan_user(patterns, ["4h"], fetch, ["AAAUSDT"])
+    cards, skipped = scanner.scan_user(patterns, ["4h"], fetch, ["AAAUSDT"], {"quality": "off"})
     assert skipped == [] and len(cards) == 1
     item = cards[0]["items"][0]
     assert item["name"] == "CHoCH" and "CHoCH вниз" in item["label"]
     only = scanner.scan_user(patterns, ["4h"], fetch, ["AAAUSDT"],
-                             {"fvg": "significant", "combos_only": True})[0]
+                             {"fvg": "significant", "combos_only": True, "quality": "off"})[0]
     assert only == []                                  # одна находка — не комбинация
 
 
@@ -208,11 +208,14 @@ def test_pine_draws_structure_and_liquidity():
     events = structure_events(zig)
     code = pine_script("X", "4h", [(df, [{**eq, "name": "EQH / EQL"}], True),
                                    (zig, [{**e, "name": "BOS"} for e in events], True)])
-    assert code.count("line.new(") == 4
+    # EQH + последний слом + уровень смены тренда (а не все BOS подряд)
+    assert code.count("line.new(") == 3
     assert "style=line.style_dotted" in code and "extend=extend.right" in code   # ликвидность не снята
-    assert '"EQH $$$"' in code
-    assert code.count("style=line.style_dashed") == 3
-    assert '"CHoCH"' in code and code.count('"BOS"') == 2
+    assert '"EQH"' in code and "$$$" not in code
+    assert code.count("style=line.style_dashed") == 2
+    assert "смена тренда" in code
+    last = events[-1]["kind"]
+    assert code.count('"BOS"') + code.count('"CHoCH"') == 1 and (('"CHoCH"' in code) == (last == "choch"))
 
 
 def test_history_texts_for_structure_and_liquidity():
@@ -234,10 +237,10 @@ def test_settings_toggle(tmp_path):
     original = storage.FILE
     storage.FILE = str(tmp_path / "users.json")
     try:
-        assert storage.get_settings(1) == {"fvg": "significant", "combos_only": False, "similar_only": False, "learn": True, "confluence_only": False, "ob_volume": True}
+        assert storage.get_settings(1) == {"fvg": "significant", "combos_only": False, "similar_only": False, "learn": True, "confluence_only": False, "ob_volume": True, "quality": "normal"}
         assert storage.toggle_setting(1, "fvg")["fvg"] == "all"
         assert storage.toggle_setting(1, "combos_only")["combos_only"] is True
         assert storage.toggle_setting(1, "fvg")["fvg"] == "significant"
-        assert storage.get_settings(1) == {"fvg": "significant", "combos_only": True, "similar_only": False, "learn": True, "confluence_only": False, "ob_volume": True}
+        assert storage.get_settings(1) == {"fvg": "significant", "combos_only": True, "similar_only": False, "learn": True, "confluence_only": False, "ob_volume": True, "quality": "normal"}
     finally:
         storage.FILE = original

@@ -47,6 +47,6 @@ def test_scanner_reports_and_filters_by_similarity():
     down, up = channel_df(110, 95, 100, 85), channel_df(100, 115, 90, 105)
     found = scanner.find_lines(down, "Канал", "channel_down", [ref])
     assert found is not None and found["similarity"] >= 0.8
-    assert "похоже на твой пример" in scanner.describe_item({**found, "name": "Канал"})
+    assert scanner.describe_item({**found, "name": "Канал"}) == "Канал"      # в выдаче — без процентов
     assert scanner.find_lines(up, "Канал", None, [ref]) is not None             # без фильтра — есть
     assert scanner.find_lines(up, "Канал", None, [ref], similar_only=True) is None   # непохожий отсеян

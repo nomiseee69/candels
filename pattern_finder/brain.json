@@ -1,0 +1,5 @@
+{
+  "backend": "llama",
+  "model": "models\\qwen2.5-3b-instruct-q4_k_m.gguf",
+  "checked_at": "2026-11-05 16:15"
+}

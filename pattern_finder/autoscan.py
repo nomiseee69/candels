@@ -9,7 +9,8 @@ from confluence import score as confluence_score, trend
 from market import candles_to_df
 from scanner import CANDLES, alert_caption, group_by_coin, scan_user
 from market import get_candles, top_symbols
-from feedback import make_judge
+import billing
+from feedback import make_judge, with_learning
 from storage import add_sent, autoscan_users, get_feedback, get_sent
 
 INTERVAL_SECONDS = {"1h": 3600, "4h": 14400, "12h": 43200, "1d": 86400, "1w": 604800}
@@ -101,10 +102,10 @@ def run_autoscan(due, send_cards, send_message, now=None):
     total = 0
     for chat_id, patterns, intervals, coins, settings in autoscan_users():
         mine = [i for i in due if i in intervals]
-        if not mine:
-            continue
+        if not mine or not billing.is_pro(chat_id, now):
+            continue                                  # автоскан — функция Pro
         judge = make_judge(get_feedback(chat_id)) if settings.get("learn", True) else None
-        cards, _ = scan_user(patterns, mine, fetch, top_symbols(coins), settings, judge=judge)
+        cards, _ = scan_user(with_learning(patterns, get_feedback(chat_id)) if judge else patterns, mine, fetch, top_symbols(coins), settings, judge=judge)
         add_higher_trends(cards, intervals, fetch)
         sent = get_sent(chat_id)
         new_cards, new_entries = [], []

@@ -54,7 +54,7 @@ def test_only_chosen_patterns_and_timeframes():
 def test_history_switch_in_script_and_help():
     groups = [(frame_df(), [TRI], False, "4h")]
     on = pine_script("SOLUSDT", "4h", groups, history_default=True)
-    off = pine_script("SOLUSDT", "4h", groups)
+    off = pine_script("SOLUSDT", "4h", groups, history_default=False)
     assert 'show_history = input.bool(true' in on and 'show_history = input.bool(false' in off
     text = pine_help("SOLUSDT", "4h", groups, selected=True)
     assert text.startswith("Разметка SOLUSDT\nТолько выбранное: Треугольник.")
@@ -70,12 +70,12 @@ def test_bot_toggles_selection():
     try:
         bot.selections.clear()
         rows = bot.patterns_keyboard(1, 9, c)["inline_keyboard"]
-        assert rows[0][0]["text"] == "✅ 1H · FVG"
-        assert rows[1][0]["text"] == "✅ 4H · Треугольник (6 касаний)"
+        assert rows[0][0]["text"].startswith("✅ 1H · FVG")
+        assert rows[1][0]["text"] == "✅ 4H · Треугольник"
         bot.change_selection(1, 9, 100, "sel", 0)            # снять FVG
-        assert edited[-1]["inline_keyboard"][0][0]["text"] == "▫️ 1H · FVG"
+        assert edited[-1]["inline_keyboard"][0][0]["text"].startswith("▫️ 1H · FVG")
         bot.change_selection(1, 9, 100, "shist")
-        assert "Прошлые случаи этих паттернов: да" in edited[-1]["inline_keyboard"][3][0]["text"]
+        assert "Прошлые случаи этих паттернов: нет" in edited[-1]["inline_keyboard"][3][0]["text"]   # по умолчанию «да»
         bot.change_selection(1, 9, 100, "snone")
         assert bot.selection(1, 9)["off"] == {0, 1}
         bot.change_selection(1, 9, 100, "sall")

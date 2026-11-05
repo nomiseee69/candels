@@ -72,7 +72,7 @@ def test_many_shape_examples_are_one_detector():
     prices = list(100 + np.cumsum(np.random.default_rng(1).normal(0, 0.2, 80))) + list(95 + 8 * w)
     item = detectors[0][1](make_df(prices))
     assert item is not None and item["example"] == 2              # похоже на второй пример
-    assert "похоже на твой пример №2" in scanner.describe_item({**item, "name": "Двойное дно"})
+    assert scanner.describe_item({**item, "name": "Двойное дно"}) == "Двойное дно"   # без процентов
 
 
 def test_judge_filters_scan():
@@ -84,7 +84,7 @@ def test_judge_filters_scan():
     try:
         fetch = lambda s, i, n: df_candles
         cards, _ = scanner.scan_user([{"name": "FVG"}], ["1h"], fetch, ["A"], judge=lambda n, d, it: (True, 0.8))
-        assert cards[0]["items"][0]["fit"] == 0.8 and "тебе подходит 80%" in cards[0]["caption"]
+        assert cards[0]["items"][0]["fit"] == 0.8 and "%" not in cards[0]["caption"].split("http")[0]
         cards, _ = scanner.scan_user([{"name": "FVG"}], ["1h"], fetch, ["A"], judge=lambda n, d, it: (False, None))
         assert cards == []
     finally:
@@ -110,8 +110,9 @@ def test_bot_votes_and_saves_example(tmp_path):
     bot.PATTERNS_DIR = str(tmp_path)
     try:
         bot.vote_card(7, 1, 1)                                   # одна находка — сразу запомнили
-        assert storage.get_feedback(7)[0]["vote"] == 1 and "Запомнил" in messages[-1][0]
-        assert messages[-1][1]["inline_keyboard"][0][0]["callback_data"] == "ex:1:0"
+        assert storage.get_feedback(7)[0]["vote"] == 1 and "запомнил" in messages[-1][0].lower()
+        assert "как ещё один пример" in messages[-1][0] and messages[-1][1] is None   # 👍 сам стал примером
+        assert storage.get_feedback(7)[0]["example"]["reference"]
         bot.vote_card(7, 2, -1)                                  # несколько — меню оценки
         rows = messages[-1][1]["inline_keyboard"]
         assert len(rows) == 3 and rows[0][-1]["text"] == "💾" and rows[1][-1]["text"] == "💾"   # FVG — отпечатком

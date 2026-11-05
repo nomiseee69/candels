@@ -20,6 +20,22 @@
 
 Блок сильнее, если импульс от него оставил FVG (имбаланс) — пометка «с FVG».
 
+Импульс (displacement): Order Block считается, только если цена УШЛА от него резко —
+за 3 свечи после блока на 1.5 средней свечи (ATR) за его границу, или оставила FVG.
+Медленный уход — это не след крупного игрока.
+
+Отработка (mitigation): блок «живой», пока цена к нему не вернулась. ПЕРВОЕ возвращение
+в зону — тот самый вход, ради которого блок отмечают. После него блок отработан: бот
+его больше не присылает и не рисует (кроме момента самого первого ретеста).
+
+ЭТАЛОННЫЙ БЛОК (как его определяет трейдер; обн. 34) — для OB и Breaker обязательны все три:
+  • ликвидность — свеча блока (или свинг) сняла прошлый свинг-хай / лой (собрала стопы);
+  • поглощение — сразу следующая свеча — резкая ПРОТИВОПОЛОЖНАЯ, закрывается
+    за тенью свечи блока (у медвежьего OB — ниже её low);
+  • объём — повышенный на свече блока или на этой резкой свече.
+Breaker — эталонный OB, который потом пробили. Mitigation — без снятия ликвидности
+(так он определён), но с поглощением. Поля: swept, engulfed, textbook.
+
 Объём: на свече блока или на импульсе сразу после неё (2 свечи) объём должен быть
 ПОВЫШЕННЫМ — не меньше 1.5× среднего за 20 свечей до блока. Так крупный игрок
 «оставляет след». volume_ratio — во сколько раз объём выше среднего (×1.8),
@@ -28,8 +44,10 @@ volume_high — да/нет. Фильтр включается в ⚙️ Нас�
 
 import numpy as np
 
+from texts import where_text
+
 from smc import find_all_fvg
-from structure import SWING_WINDOW
+from structure import SWING_WINDOW, atr
 from trendlines import pivot_highs, pivot_lows
 
 CANDLE_LOOKBACK = 3     # кандидат — среди свинга и 3 свечей до него
@@ -40,6 +58,8 @@ MAX_AGE = 1000          # старый блок тоже важен, если о
 VOLUME_HIGH = 1.5       # объём блока ≥ 1.5× среднего за 20 свечей — «повышенный»
 VOLUME_AVERAGE = 20
 VOLUME_REACH = 2        # смотрим свечу блока и 2 свечи импульса после неё
+DISPLACEMENT_BARS = 3   # импульс — за 3 свечи после блока…
+DISPLACEMENT_ATR = 1.5  # …цена ушла за границу блока хотя бы на 1.5 ATR (или оставила FVG)
 
 BLOCK_NAMES = {
     "bullish_ob": "бычий OB", "bearish_ob": "медвежий OB",
@@ -147,6 +167,9 @@ def all_blocks(df, window=SWING_WINDOW):
         blocks.append({**blk, "kind": MIRROR[blk["kind"]], "zone": (-top, -bottom)})
 
     ratios = volume_ratios(df)
+    sizes = atr(df).to_numpy()
+    peaks = np.array(pivot_highs(highs, window), dtype=int)
+    troughs = np.array(pivot_lows(lows, window), dtype=int)
     # имбалансы по направлению: свеча начала FVG → бычий/медвежий
     gaps = [(g["start"], g["kind"].startswith("bullish"))
             for g in find_all_fvg(df, lookback=len(df), include_filled=True)]
@@ -161,17 +184,57 @@ def all_blocks(df, window=SWING_WINDOW):
         bullish = blk["kind"].startswith("bullish")
         if blk["family"] == "ob":
             blk["imbalance"] = any(blk["start"] <= g <= blk["end"] and up == bullish for g, up in gaps)
+            c = blk["start"]
+            after = slice(c + 1, min(c + 1 + DISPLACEMENT_BARS, len(closes)))
+            move = (max(highs[after], default=top) - top) if bullish else (bottom - min(lows[after], default=bottom))
+            blk["displacement"] = float(move / sizes[c]) if sizes[c] > 0 else 0.0
+            blk["strong"] = bool(blk["imbalance"] or blk["displacement"] >= DISPLACEMENT_ATR)
         else:
             blk["imbalance"] = False
+            blk["strong"] = True
         if ratios is not None:
             near = ratios[blk["start"]:blk["start"] + VOLUME_REACH + 1]
             near = near[np.isfinite(near)]
             blk["volume_ratio"] = float(near.max()) if len(near) else None
             blk["volume_high"] = blk["volume_ratio"] is not None and blk["volume_ratio"] >= VOLUME_HIGH
+        _textbook(blk, highs, lows, closes, ratios, peaks, troughs)
         # нетронутый блок сильнее, блок с FVG — ещё сильнее
         blk["score"] = (0.92 if blk["touched_at"] is None else 0.88) + (0.05 if blk["imbalance"] else 0)
         blk["label"] = describe_block(blk)
     return sorted(blocks, key=lambda blk: blk["end"])
+
+
+FROM_HIGH = ("bearish_ob", "bullish_breaker", "bullish_mitigation")   # блоки от свинг-хая
+LIQUIDITY_LOOKBACK = 60     # прошлый свинг, который снимает блок, — не дальше 60 свечей
+ENGULF_BARS = 1             # резкая противоположная свеча — СРАЗУ следующая после блока
+
+
+def _textbook(blk, highs, lows, closes, ratios, peaks, troughs):
+    """Эталонный ли блок: сняли ликвидность, поглотили, объём (см. описание модуля)."""
+    c = int(blk["start"])
+    swing = int(blk.get("swing", c))
+    n = len(closes)
+    top_side = blk["kind"] in FROM_HIGH                      # блок у вершины: свеча вверх, потом вниз
+    first, last = min(c, swing), max(c, swing)
+    if top_side:
+        prior = peaks[(peaks < first) & (peaks >= first - LIQUIDITY_LOOKBACK)]
+        blk["swept"] = bool(len(prior)) and max(highs[first:last + 1]) > highs[prior[-1]]
+        blk["engulfed"] = any(closes[i] < lows[c] for i in range(c + 1, min(n, c + 1 + ENGULF_BARS)))
+    else:
+        prior = troughs[(troughs < first) & (troughs >= first - LIQUIDITY_LOOKBACK)]
+        blk["swept"] = bool(len(prior)) and min(lows[first:last + 1]) < lows[prior[-1]]
+        blk["engulfed"] = any(closes[i] > highs[c] for i in range(c + 1, min(n, c + 1 + ENGULF_BARS)))
+    if ratios is not None:
+        near = ratios[c:min(n, c + 2)]                         # объём на свече блока или следующей
+        near = near[np.isfinite(near)]
+        loud = bool(len(near)) and float(near.max()) >= VOLUME_HIGH
+    else:
+        loud = True                                            # объёма нет (скриншот) — не проверяем
+    blk["loud"] = loud
+    if blk["family"] == "mitigation":
+        blk["textbook"] = bool(blk["engulfed"] and loud)
+    else:
+        blk["textbook"] = bool(blk["swept"] and blk["engulfed"] and loud)
 
 
 def describe_block(blk):
@@ -181,25 +244,45 @@ def describe_block(blk):
     elif blk["touched_at"] is None:
         state = "ещё не тестировался"
     else:
-        state = "тестировался"
-    where = "цена в зоне" if blk["distance"] == 0 else f"до зоны {blk['distance']:.1%}"
+        state = "тестировался (отработан)"
+    where = where_text(blk["distance"])
     tags = (["с FVG"] if blk.get("imbalance") else []) + (
-        [f"объём ×{blk['volume_ratio']:.1f}"] if blk.get("volume_ratio") is not None else [])
+        ["повышенный объём"] if blk.get("volume_high") else [])
     tag = f" ({', '.join(tags)})" if tags else ""
     return f"{BLOCK_NAMES[blk['kind']]}{tag} {bottom:.6g}–{top:.6g}, {state}, {where}"
 
 
-def find_block(df, family, volume_only=False, choose=None):
-    """Действующий блок семейства family ("ob" / "breaker" / "mitigation") для алерта:
-    только что сложился или цена подошла к нему (ретест). Ближайший к цене.
-    volume_only — только Order Block с повышенным объёмом (у Breaker/Mitigation не проверяем)."""
+def is_mitigated(blk):
+    """Блок отработан: цена уже возвращалась в зону (или пробила её)."""
+    return blk["broken_at"] is not None or blk["touched_at"] is not None
+
+
+def find_block(df, family, volume_only=False, choose=None, strict=True):
+    """Блок семейства family ("ob" / "breaker" / "mitigation") для алерта:
+      • только что сложился и цена к нему ещё не возвращалась;
+      • или цена подошла к нему впервые (ближе 1%);
+      • или ПЕРВЫЙ ретест прямо сейчас (на последних 3 свечах).
+    Блок, в который цена уже заходила раньше, отработан — не присылаем.
+    Order Block — только с резким импульсом (FVG или ≥ 1.5 ATR) и, если volume_only, с объёмом."""
     n = len(df)
-    candidates = [
-        blk for blk in all_blocks(df)
-        if blk["family"] == family and blk["broken_at"] is None and blk["end"] >= n - MAX_AGE
-        and (blk["end"] >= n - RECENT_BLOCK or blk["distance"] <= NEAR_ZONE)
-        and not (volume_only and family == "ob" and blk.get("volume_high") is False)
-    ]
+    candidates = []
+    for blk in all_blocks(df):
+        if blk["family"] != family or blk["broken_at"] is not None or blk["end"] < n - MAX_AGE:
+            continue
+        touched = blk["touched_at"]
+        first_retest = touched is not None and touched >= n - RECENT_BLOCK
+        untouched = touched is None and (blk["end"] >= n - RECENT_BLOCK or blk["distance"] <= NEAR_ZONE)
+        if not (first_retest or untouched):
+            continue
+        if family == "ob" and not blk.get("strong", True):
+            continue
+        if strict and not blk.get("textbook", True):
+            continue                                   # не эталонный: нет ликвидности / поглощения / объёма
+        if volume_only and family == "ob" and blk.get("volume_high") is False:
+            continue
+        if first_retest:
+            blk["label"] = blk["label"].replace("тестировался (отработан)", "первый ретест сейчас")
+        candidates.append(blk)
     if not candidates:
         return None
     if choose:                                        # самый похожий на пример пользователя

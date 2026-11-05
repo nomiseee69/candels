@@ -157,12 +157,16 @@ def _side_fill(mask, line, offset=6):
     return filled / checks if checks else 1.0
 
 
-def find_lines(fg):
+SHORT_LEVEL_RATIO = 0.06       # горизонтальный уровень может быть коротким — от 6% ширины
+
+
+def find_lines(fg, min_ratio=MIN_LINE_RATIO, side_max=SIDE_FILL_MAX):
     """Ищет длинные прямые (нарисованные линии), склеивает дубли, убирает пунктир."""
     h, w = fg.shape
+    short = min_ratio < MIN_LINE_RATIO               # короткие линии: точнее по углу, меньше голосов
     raw = cv2.HoughLinesP(
-        fg, 1, np.pi / 180, threshold=60,
-        minLineLength=int(w * MIN_LINE_RATIO), maxLineGap=MAX_LINE_GAP,
+        fg, 1, np.pi / (360 if short else 180), threshold=30 if short else 60,
+        minLineLength=int(w * min_ratio), maxLineGap=MAX_LINE_GAP + (2 if short else 0),
     )
     if raw is None:
         return []
@@ -187,7 +191,7 @@ def find_lines(fg):
     lines = [_merge(g) for g in groups]
     lines = [
         ln for ln in lines
-        if _fill_ratio(fg, ln) >= DOTTED_FILL and _side_fill(fg, ln) <= SIDE_FILL_MAX
+        if _fill_ratio(fg, ln) >= DOTTED_FILL and _side_fill(fg, ln) <= side_max
     ]
     return sorted(lines, key=lambda ln: ln.x1)
 
@@ -196,6 +200,28 @@ def erase_lines(mask, lines, thickness=11):
     clean = mask.copy()
     for ln in lines:
         cv2.line(clean, (ln.x1, ln.y1), (ln.x2, ln.y2), 0, thickness)
+    return clean
+
+
+def erase_lines_by_color(img, mask, lines, thickness=11, tolerance=90):
+    """Стирает нарисованные линии, но только пиксели ЦВЕТА линии: свеча под линией (фитиль,
+    который линия задевает) остаётся целой — иначе её high/low «съедался» бы на несколько пикселей."""
+    clean = mask.copy()
+    h, w = mask.shape
+    for ln in lines:
+        band = np.zeros_like(mask)
+        cv2.line(band, (ln.x1, ln.y1), (ln.x2, ln.y2), 255, thickness)
+        n = max(2, int(ln.length))
+        xs = np.clip(np.linspace(ln.x1, ln.x2, n).round().astype(int), 0, w - 1)
+        ys = np.clip(np.linspace(ln.y1, ln.y2, n).round().astype(int), 0, h - 1)
+        on = mask[ys, xs] > 0
+        if not on.any():
+            continue
+        color = np.median(img[ys[on], xs[on]].astype(int), axis=0)
+        near = np.abs(img.astype(int) - color).sum(axis=2) < tolerance
+        clean[(band > 0) & near] = 0
+        # тонкую серединку линии стираем всегда (антиалиасинг даёт «промежуточные» цвета)
+        cv2.line(clean, (ln.x1, ln.y1), (ln.x2, ln.y2), 0, 1)
     return clean
 
 
@@ -432,21 +458,26 @@ def _runs(rows):
     return [(int(rows[s]), int(rows[e])) for s, e in zip(starts, ends)]
 
 
-def _columns(mask, hue, h):
+def _columns(mask, hsv, h, zone=CANDLE_ZONE):
     """По каждому столбцу картинки: верх и низ свечи, цвет (+1 зелёный, −1 красный, 0 — не понять)
     и высота столбика объёма (0 — нет)."""
     cols = []
     for x in range(mask.shape[1]):
         runs = _runs(np.where(mask[:, x] > 0)[0])
-        candle = [r for r in runs if r[0] < CANDLE_ZONE * h]
+        candle = [r for r in runs if r[0] < zone * h]
         volume = [r for r in runs if r[0] >= VOLUME_ZONE * h and r[1] >= 0.9 * h]
         if not candle:
             cols.append(None)
             continue
         top, bottom = max(candle, key=lambda r: r[1] - r[0])      # самая длинная группа — свеча, не значок
-        hues = hue[top:bottom + 1, x][mask[top:bottom + 1, x] > 0]
+        inside = mask[top:bottom + 1, x] > 0
+        hues = hsv[top:bottom + 1, x, 0][inside]
+        sats = hsv[top:bottom + 1, x, 1][inside]
         green = np.mean((hues >= GREEN_HUE[0]) & (hues <= GREEN_HUE[1])) if len(hues) else 0.5
         color = 1 if green > 0.6 else -1 if green < 0.4 else 0
+        if len(sats) and np.mean(sats) < SATURATION_MIN:
+            color = 0                                        # чёрно-белые свечи: цвета нет
+        
         vol = max((r[1] - r[0] + 1 for r in volume if r[0] > bottom + RUN_GAP), default=0)
         cols.append((top, bottom, color, vol))
     return cols
@@ -468,6 +499,15 @@ def _groups(cols):
     if not groups:
         return []
     width = max(1, int(np.median([len(g) for g in groups])))
+    # обрывки в 1–2 столбца вплотную к соседу — та же свеча (цвет «мигает» под полупрозрачной
+    # заливкой или на краю тела), а не отдельные свечи
+    merged = []
+    for g in groups:
+        if merged and g[0] == merged[-1][-1] + 1 and min(len(g), len(merged[-1])) < 0.5 * width:
+            merged[-1] = merged[-1] + g
+        else:
+            merged.append(g)
+    groups = merged
     result = []
     for g in groups:
         parts = max(1, round(len(g) / width)) if len(g) > 2.5 * width else 1
@@ -482,11 +522,14 @@ def _groups(cols):
         with_volume = np.mean([any(cols[x][3] for x in g) for g in result]) > 0.8
         # большой пропуск у края (последние / первые 8 свечей) — всё за ним не свечи
         gaps = np.diff(centers)
-        far = [i for i in range(max(0, len(gaps) - 8), len(gaps)) if gaps[i] > 2.2 * step]
+        # (только если за пропуском — 1–3 «островка»: подписи, а не свечи; свечи за пропуском
+        # бывают — например, бледные свечи, которые не прошли проверку цвета)
+        far = [i for i in range(max(0, len(gaps) - 8), len(gaps))
+               if gaps[i] > 2.2 * step and len(gaps) - i <= 3]
         if far:
             result, centers = result[:far[0] + 1], centers[:far[0] + 1]
         gaps = np.diff(centers)
-        far = [i for i in range(min(8, len(gaps))) if gaps[i] > 2.2 * step]
+        far = [i for i in range(min(8, len(gaps))) if gaps[i] > 2.2 * step and i + 1 <= 3]
         if far:
             result, centers = result[far[-1] + 1:], centers[far[-1] + 1:]
 
@@ -502,26 +545,69 @@ def _groups(cols):
     return result
 
 
-def extract_candles(path):
-    """Свечи с картинки в пикселях (цена вверх = больше): DataFrame open/high/low/close
-    (+ volume, если внизу есть столбики объёма) или None, если свечей не видно.
-    Масштаб — пиксели, но для правил SMC это не важно: всё меряется в средних свечах (ATR)."""
-    img = load_image(path)
-    h, w = img.shape[:2]
-    fg = foreground_mask(img, detect_background(img))
-    mask = erase_dotted(erase_lines(fg, find_lines(fg)))
-    if candle_ratio(mask) < CANDLE_MODE_RATIO:
-        return None                                        # линейный график — свечей нет
-    colored = colored_mask(img) & mask
-    if np.count_nonzero(colored) > 0.5 * np.count_nonzero(mask):
-        mask = colored
-    hue = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[:, :, 0]
-    cols = _columns(mask, hue, h)
+def _box_lines(fg, w, h):
+    """Нарисованный прямоугольник (боковик): две длинные горизонтальные линии одна над другой
+    с общим отрезком по x. Возвращает (верх, низ, лево, право) в пикселях или None."""
+    flat = [ln for ln in find_lines(fg) if abs(ln.angle) < 2 and ln.length > 0.25 * w]
+    best = None
+    for i, a in enumerate(flat):
+        for b in flat[i + 1:]:
+            left, right = max(a.x1, b.x1), min(a.x2, b.x2)
+            gap = abs((a.y1 + a.y2) / 2 - (b.y1 + b.y2) / 2)
+            if right - left < 0.7 * min(a.length, b.length) or gap < 0.15 * h:
+                continue
+            score = (right - left) * gap
+            if best is None or score > best[0]:
+                ya, yb = (a.y1 + a.y2) / 2, (b.y1 + b.y2) / 2
+                best = (score, int(min(ya, yb)), int(max(ya, yb)), int(left), int(right))
+    return best[1:] if best else None
+
+
+def _poc_row(mask, box):
+    """Линия POC внутри прямоугольника: строка с самым длинным сплошным горизонтальным отрезком."""
+    top, bottom, left, right = box
+    best = None
+    for y in range(top + 4, bottom - 3):
+        row = mask[y, left + 3:right - 3] > 0
+        if not row.any():
+            continue
+        padded = np.concatenate([[0], row.astype(int), [0]])
+        edges = np.flatnonzero(np.diff(padded))
+        run = int((edges[1::2] - edges[::2]).max())
+        if run >= 0.25 * (right - left) and (best is None or run > best[1]):
+            best = (y, run)
+    return best[0] if best else None
+
+
+def _wick(full, x_range, top, bottom, gap=2):
+    """Тонкие тени (фитили) часто бледные — по цвету их не видно. Достраиваем вверх и вниз
+    по всем непустым пикселям центральных столбцов свечи."""
+    if full is None:
+        return top, bottom
+    h = full.shape[0]
+    column = full[:, x_range].max(axis=1) > 0
+    y, miss = top - 1, 0
+    while y >= 0 and miss <= gap:
+        miss = 0 if column[y] else miss + 1
+        y -= 1
+    new_top = y + 1 + miss
+    y, miss = bottom + 1, 0
+    while y < h and miss <= gap:
+        miss = 0 if column[y] else miss + 1
+        y += 1
+    new_bottom = y - 1 - miss
+    return min(top, new_top), max(bottom, new_bottom)
+
+
+def _candle_rows(img, mask, h, zone=CANDLE_ZONE, full=None):
+    cols = _columns(mask, cv2.cvtColor(img, cv2.COLOR_BGR2HSV), h, zone)
     rows = []
     for g in _groups(cols):
         parts = [cols[x] for x in g]
         top = min(p[0] for p in parts)
         bottom = max(p[1] for p in parts)
+        center = int(round(np.mean(g)))
+        top, bottom = _wick(full, slice(max(0, center - 1), center + 2), top, bottom)
         cover = np.zeros(bottom - top + 1)
         for p in parts:
             cover[p[0] - top:p[1] - top + 1] += 1
@@ -532,23 +618,436 @@ def extract_candles(path):
             quarter = (bottom - top) / 4
             body_top, body_bottom = top + quarter, bottom - quarter
         color = np.sign(sum(p[2] for p in parts))
-        high, low = h - 1 - top, h - 1 - bottom
-        upper, lower = h - 1 - body_top, h - 1 - body_bottom
-        rows.append({"x": float(np.mean(g)), "high": float(high), "low": float(low),
-                     "open": float(lower if color >= 0 else upper),
-                     "close": float(upper if color >= 0 else lower),
+        rows.append({"x": float(np.mean(g)), "width": len(g), "high": float(h - 1 - top), "low": float(h - 1 - bottom),
+                     "upper": float(h - 1 - body_top), "lower": float(h - 1 - body_bottom),
                      "color": int(color), "volume": float(max(p[3] for p in parts))})
-    if len(rows) < 20:
-        return None
+    return rows
+
+
+def _to_frame(rows, h):
     df = pd.DataFrame(rows)
-    df = df[(df["high"] - df["low"]) < 0.6 * h].reset_index(drop=True)   # выбросы: столбы-метки на всю высоту
-    # у неизвестного цвета направление — по следующей свече
-    unknown = df["color"] == 0
-    nxt = df["close"].shift(-1).fillna(df["close"])
-    up = nxt > (df["high"] + df["low"]) / 2
-    df.loc[unknown & up, ["open", "close"]] = df.loc[unknown & up, ["low", "high"]].to_numpy()
-    df.loc[unknown & ~up, ["open", "close"]] = df.loc[unknown & ~up, ["high", "low"]].to_numpy()
+    # выбросы: серые столбы-метки на всю высоту (курсор). Цветная длинная свеча — это импульс, её оставляем
+    tall = df["high"] - df["low"]
+    df = df[~(((tall >= 0.6 * h) & (df["color"] == 0)) | (tall >= 0.95 * h))].reset_index(drop=True)
+    # направление: по цвету; если цвета нет (чёрно-белый график) — по следующей свече
+    nxt = df["close"] if "close" in df else ((df["upper"] + df["lower"]) / 2).shift(-1)
+    up = (df["color"] > 0) | ((df["color"] == 0) & (nxt.fillna((df["upper"] + df["lower"]) / 2)
+                                                     > (df["upper"] + df["lower"]) / 2))
+    df["open"] = np.where(up, df["lower"], df["upper"])
+    df["close"] = np.where(up, df["upper"], df["lower"])
     if (df["volume"] > 0).mean() < 0.5:
         df = df.drop(columns="volume")                     # объёма на скрине нет
     df["open_time"] = pd.date_range("2000-01-01", periods=len(df), freq="h", tz="UTC")
-    return df[["open_time", "open", "high", "low", "close"] + (["volume"] if "volume" in df else [])]
+    return df
+
+
+FILL_DIFF = 12               # заливка прямоугольника — бледная, но отличается от фона
+FILL_SOLID = 0.85            # прямоугольник залит сплошь (≥ 85% площади рамки)
+FILL_COLOR = 45              # пиксели цвета заливки (± 45) стираем, свечи под ней — нет
+
+
+def filled_boxes(img, background):
+    """Залитые прямоугольники, которые ты нарисовал на скрине (зона OB, FVG, боковик) —
+    и зона, которую рисует сам бот на «примере с рынка». Возвращает [(лево, верх, право, низ, цвет)].
+    Свечи тонкие и стоят через промежутки — большой «сплошной квадрат» они не дают."""
+    h, w = img.shape[:2]
+    diff = np.abs(img.astype(int) - background).sum(axis=2)
+    soft = (diff > FILL_DIFF).astype(np.uint8)
+    k = max(9, int(min(h, w) * 0.04))
+    solid = cv2.morphologyEx(soft, cv2.MORPH_OPEN, np.ones((k, k), np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(solid)
+    boxes = []
+    for i in range(1, count):
+        x, y, bw, bh, area = stats[i]
+        if bw < 0.08 * w or bh < 0.04 * h or area < FILL_SOLID * bw * bh:
+            continue
+        region = img[y:y + bh, x:x + bw][labels[y:y + bh, x:x + bw] == i]
+        color = np.median(region, axis=0)
+        if np.abs(color - background).sum() > 3 * FOREGROUND_DIFF:
+            continue                                           # не бледная заливка, а что-то тёмное / яркое
+        if np.mean(np.abs(region.astype(int) - color).sum(axis=1) < FILL_COLOR) < 0.7:
+            continue                                           # не однотонно — это не заливка
+        boxes.append((int(x), int(y), int(x + bw - 1), int(y + bh - 1), color))
+    return boxes
+
+
+def erase_boxes(img, boxes, background):
+    """Стирает заливку и рамку прямоугольников (до цвета фона), свечи под ними остаются."""
+    clean = img.copy()
+    h, w = img.shape[:2]
+    for left, top, right, bottom, color in boxes:
+        y0, y1, x0, x1 = max(0, top - 4), min(h, bottom + 5), max(0, left - 4), min(w, right + 5)
+        part = clean[y0:y1, x0:x1].astype(int)
+        near_fill = np.abs(part - color).sum(axis=2) < FILL_COLOR
+        # рамка: полоса у краёв — её цвет похож на заливку оттенком, но темнее
+        band = np.zeros(near_fill.shape, bool)
+        band[:9, :] = band[-9:, :] = True
+        band[:, :9] = band[:, -9:] = True
+        hsv = cv2.cvtColor(clean[y0:y1, x0:x1], cv2.COLOR_BGR2HSV).astype(int)
+        fill_hue = int(cv2.cvtColor(np.uint8([[color]]), cv2.COLOR_BGR2HSV)[0, 0, 0])
+        hue_gap = np.minimum(np.abs(hsv[..., 0] - fill_hue), 180 - np.abs(hsv[..., 0] - fill_hue))
+        frame = band & (hue_gap < 12) & (np.abs(part - background).sum(axis=2) > FILL_DIFF)
+        clean[y0:y1, x0:x1][near_fill | frame] = background.astype(np.uint8)
+        _erase_outline(clean, img, (left, top, right, bottom), background)
+    return clean
+
+
+def _erase_outline(clean, img, box, background, reach=14):
+    """Рамка прямоугольника ЛЮБОГО цвета (красная, голубая…): тонкие линии по краям зоны
+    (± несколько пикселей от края заливки). Строки и столбцы рамки — те, где почти по всей длине
+    стороны есть «не фон». Вертикальные стороны не трогаем там, где столбец уходит за пределы
+    зоны — это свеча, которая стоит прямо на краю."""
+    left, top, right, bottom = box
+    h, w = img.shape[:2]
+    img = clean.copy()                       # заливку уже стёрли — она не мешает искать рамку
+    differs = np.abs(img.astype(int) - background).sum(axis=2) > FILL_DIFF * 2
+    inner_x = slice(left + 5, max(left + 6, right - 5))
+    inner_y = slice(top + 5, max(top + 6, bottom - 5))
+    width, height = max(1, right - left - 10), max(1, bottom - top - 10)
+    rows = [y for y in list(range(top - reach, top + reach + 1)) + list(range(bottom - reach, bottom + reach + 1))
+            if 0 <= y < h and differs[y, inner_x].sum() >= 0.6 * width]
+    cols = [x for x in list(range(left - reach, left + reach + 1)) + list(range(right - reach, right + reach + 1))
+            if 0 <= x < w and differs[inner_y, x].sum() >= 0.6 * height]
+    if not rows:
+        return
+    y0, y1 = min(rows), max(rows)
+    xs = slice(max(0, left - reach), min(w, right + reach + 1))
+    # цвет рамки — по середине горизонтальных сторон (там нет свечей)
+    color = np.median(np.concatenate([img[y, inner_x].reshape(-1, 3) for y in rows]).astype(int), axis=0)
+    for a, b in _clusters(rows, gap=2):
+        a, b = max(0, a - 1), min(h - 1, b + 1)        # с краями сглаживания
+        # свеча, которая проходит СКВОЗЬ сторону рамки (есть «не фон» и над, и под полосой), — не трогаем
+        crossing = differs[max(0, a - 1), xs] & differs[min(h - 1, b + 1), xs]
+        for y in range(a, b + 1):
+            row = clean[y, xs]
+            row[~crossing] = background.astype(np.uint8)
+    # вертикальные стороны: стираем, но только там, где «не фон» по горизонтали узкий (сама линия
+    # рамки); если рядом широкое тело свечи — это свеча, её не трогаем
+    for c0, c1 in _clusters(cols, gap=2):
+        c0, c1 = max(0, c0 - 1), min(w - 1, c1 + 1)
+        line = c1 - c0 + 1
+        # свеча стоит ровно на стороне рамки и продолжается за её пределы (выше или ниже) — не трогаем
+        beyond = lambda rows: max((differs[rows, x].sum() for x in range(c0, c1 + 1)), default=0)
+        if beyond(slice(max(0, y0 - 9), max(0, y0 - 1))) >= 5 or beyond(slice(min(h, y1 + 2), min(h, y1 + 10))) >= 5:
+            continue
+        for y in range(y0, y1 + 1):
+            # сплошной «не фон» вокруг рамки в этой строке: если он намного шире самой линии —
+            # рядом тело свечи, строку не трогаем
+            lo = c0
+            while lo > 0 and differs[y, lo - 1] and c0 - lo < 12:
+                lo -= 1
+            hi = c1
+            while hi < w - 1 and differs[y, hi + 1] and hi - c1 < 12:
+                hi += 1
+            if (hi - lo + 1) - line <= 2:
+                clean[y, c0:c1 + 1] = background.astype(np.uint8)
+            else:                                        # рядом свеча: стираем только цвет рамки
+                part = clean[y, c0:c1 + 1]
+                part[np.abs(img[y, c0:c1 + 1].astype(int) - color).sum(axis=-1) < 110] = background.astype(np.uint8)
+
+
+def _long_runs(mask, axis, share):
+    """Строки (axis=1) или столбцы (axis=0), где есть сплошной отрезок ≥ share длины."""
+    data = mask > 0 if axis == 1 else (mask > 0).T
+    size = data.shape[1]
+    result = []
+    for i, row in enumerate(data):
+        if row.sum() < share * size:
+            continue
+        padded = np.concatenate([[0], row.astype(int), [0]])
+        edges = np.flatnonzero(np.diff(padded))
+        if (edges[1::2] - edges[::2]).max() >= share * size:
+            result.append(i)
+    return result
+
+
+def _clusters(values, gap=3):
+    groups = []
+    for v in values:
+        if groups and v - groups[-1][-1] <= gap:
+            groups[-1].append(v)
+        else:
+            groups.append([v])
+    return [(g[0], g[-1]) for g in groups]
+
+
+def chart_frames(fg):
+    """Рамки графиков (как у matplotlib: свечи сверху, объём снизу — две рамки одна под другой).
+    Возвращает [(верх, низ, лево, право)] — внутренности рамок."""
+    h, w = fg.shape
+    lines = _clusters(_long_runs(fg, 1, 0.6))
+    frames = []
+    for (a0, a1), (b0, b1) in zip(lines, lines[1:]):
+        top, bottom = a1 + 1, b0 - 1
+        if bottom - top < 0.15 * h:
+            continue
+        cols = _clusters(_long_runs(fg[top:bottom + 1], 0, 0.9))
+        if len(cols) < 2 or cols[-1][0] - cols[0][1] < 0.6 * w:
+            continue
+        frames.append((top + 2, bottom - 2, cols[0][1] + 3, cols[-1][0] - 3))
+    return frames
+
+
+def main_panel(img, fg):
+    """Если это картинка из нескольких графиков в рамках (например, «пример с рынка» от бота:
+    свечи + объём + подписи осей) — оставляем самый большой график. Иначе — None."""
+    frames = chart_frames(fg)
+    if len(frames) < 2:
+        return None
+    lefts = [f[2] for f in frames]
+    if max(lefts) - min(lefts) > 0.05 * fg.shape[1]:
+        return None                                          # рамки не одна под другой — не графики
+    return max(frames, key=lambda f: f[1] - f[0])
+
+
+def drawn_color_lines(img, min_ratio=0.04):
+    """Прямые цвета рисунка: насыщенный цвет, но не зелёный и не красный (это цвета свечей)."""
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    hue, sat = hsv[..., 0].astype(int), hsv[..., 1].astype(int)
+    candle = ((hue >= GREEN_HUE[0]) & (hue <= GREEN_HUE[1])) | (hue <= 12) | (hue >= 160)
+    background = detect_background(img)
+    visible = (np.abs(img.astype(int) - background).sum(axis=2) > FOREGROUND_DIFF) & (hsv[..., 2] >= 80)
+    mask = np.where((sat >= 90) & ~candle & visible, 255, 0).astype(np.uint8)
+    if np.count_nonzero(mask) < 20:
+        return []
+    h, w = mask.shape
+    raw = cv2.HoughLinesP(mask, 1, np.pi / 360, threshold=20, minLineLength=int(w * min_ratio), maxLineGap=4)
+    if raw is None:
+        return []
+    segments = []
+    for x1, y1, x2, y2 in raw.reshape(-1, 4):
+        if x2 < x1:
+            x1, y1, x2, y2 = x2, y2, x1, y1
+        seg = Line(int(x1), int(y1), int(x2), int(y2))
+        if abs(seg.angle) <= 60:
+            segments.append(seg)
+    groups = []
+    for seg in sorted(segments, key=lambda s: -s.length):
+        for group in groups:
+            if _same_line(group[0], seg):
+                group.append(seg)
+                break
+        else:
+            groups.append([seg])
+    return [_merge(g) for g in groups]
+
+
+def _grid_line(img, line):
+    """Линия сетки графика: горизонталь серого цвета почти на всю ширину картинки."""
+    h, w = img.shape[:2]
+    at_edge = line.x1 <= 0.02 * w or line.x2 >= 0.98 * w        # сетка идёт от края картинки
+    if abs(line.angle) >= 1 or not (at_edge or line.x2 - line.x1 >= 0.85 * w):
+        return False
+    y = int(np.clip(round((line.y1 + line.y2) / 2), 0, h - 1))
+    xs = np.linspace(line.x1, line.x2, 50).round().astype(int).clip(0, w - 1)
+    hsv = cv2.cvtColor(img[y, xs][None], cv2.COLOR_BGR2HSV)[0]
+    return float(np.median(hsv[:, 1])) < 40
+
+
+def _candle_like(img, line):
+    """Ряд мелких зелёных и красных свечей тоже похож на прямую — такую «линию» не стираем."""
+    n = max(2, int(line.length))
+    xs = np.linspace(line.x1, line.x2, n).round().astype(int)
+    ys = np.linspace(line.y1, line.y2, n).round().astype(int)
+    ok = (ys >= 0) & (ys < img.shape[0]) & (xs >= 0) & (xs < img.shape[1])
+    hsv = cv2.cvtColor(img[ys[ok], xs[ok]][None], cv2.COLOR_BGR2HSV)[0].astype(int)
+    colored = hsv[hsv[:, 1] >= SATURATION_MIN]
+    if len(colored) < 0.3 * n:
+        return False
+    green = np.mean((colored[:, 0] >= GREEN_HUE[0]) & (colored[:, 0] <= GREEN_HUE[1]))
+    red = np.mean((colored[:, 0] <= 10) | (colored[:, 0] >= 160))
+    return green >= 0.15 and red >= 0.15
+
+
+def _prepare(path, with_boxes=False):
+    img = load_image(path)
+    background = detect_background(img)
+    panel = main_panel(img, foreground_mask(img, background))
+    if panel is not None:                        # несколько графиков в рамках — берём главный
+        top, bottom, left, right = panel
+        img = img[top:bottom + 1, left:right + 1].copy()
+    h, w = img.shape[:2]
+    boxes = filled_boxes(img, background)
+    if boxes:                                    # заливку не путаем со свечами
+        img = erase_boxes(img, boxes, background)
+    fg = foreground_mask(img, background)
+    lines = [ln for ln in find_lines(fg) if not _candle_like(img, ln) and not _grid_line(img, ln)]
+    # короткие ГОРИЗОНТАЛЬНЫЕ линии (уровень BOS, EQH/EQL) — трейдер часто рисует их коротко
+    short = [ln for ln in find_lines(fg, SHORT_LEVEL_RATIO, side_max=0.6)
+             if not _candle_like(img, ln) and not _grid_line(img, ln)
+             and not any(_same_line(ln, other) for other in lines)]
+    lines += [ln for ln in short if abs(ln.angle) < 2]
+    # линии «цвета рисунка» (не зелёные и не красные, как свечи) — точно нарисованы тобой, даже короткие
+    for ln in drawn_color_lines(img):
+        if not any(_same_line(ln, other) for other in lines):
+            lines.append(ln)
+    # короткие НАКЛОННЫЕ — только парой (две границы флага / вымпела рядом друг с другом)
+    sloped = [ln for ln in short if 2 <= abs(ln.angle) <= 60]
+    for i, a in enumerate(sloped):
+        for b in sloped[i + 1:]:
+            overlap = min(a.x2, b.x2) - max(a.x1, b.x1)
+            if overlap >= 0.6 * min(a.x2 - a.x1, b.x2 - b.x1) and abs(a.angle - b.angle) < 40 \
+                    and abs((a.y1 + a.y2) - (b.y1 + b.y2)) / 2 > 6:
+                lines += [ln for ln in (a, b) if ln not in lines]
+    mask = erase_dotted(erase_lines_by_color(img, fg, lines))
+    PANEL["cropped"] = panel is not None
+    PANEL["lines"] = lines
+    if with_boxes:
+        return img, h, w, fg, mask, boxes
+    return img, h, w, fg, mask
+
+
+PANEL = {"cropped": False, "lines": []}   # вырезали ли главный график из рамки; нарисованные линии
+
+
+def _zone():
+    """Где кончаются свечи: внизу обычного скрина бывает объём, в вырезанной рамке — нет."""
+    return 1.01 if PANEL["cropped"] else CANDLE_ZONE
+
+
+def _colored(img, mask):
+    colored = colored_mask(img) & mask
+    return colored if np.count_nonzero(colored) > 0.5 * np.count_nonzero(mask) else mask
+
+
+def extract_candles(path):
+    """Свечи с картинки в пикселях (цена вверх = больше): DataFrame open/high/low/close
+    (+ volume, если внизу есть столбики объёма) или None, если свечей не видно.
+    Масштаб — пиксели, но для правил SMC это не важно: всё меряется в средних свечах (ATR)."""
+    return extract_candles_and_zones(path)[0]
+
+
+MIN_CANDLES = 12            # крупный скрин: 12 свечей уже достаточно
+
+
+def _drop_box_sides(rows, boxes, h):
+    """Остаток боковой стороны рамки, похожий на свечу: узкий «столбик» ровно у левого или правого
+    края зоны на всю её высоту. Настоящая свеча (даже OB, совпадающий с зоной) — шире."""
+    if not rows or not boxes:
+        return rows
+    typical = float(np.median([r["width"] for r in rows]))
+    keep = []
+    for r in rows:
+        fake = False
+        for left, top, right, bottom, _ in boxes:
+            at_side = min(abs(r["x"] - left), abs(r["x"] - right)) <= max(4, typical)
+            span = (r["high"] - r["low"]) >= 0.8 * (bottom - top)
+            inside = r["high"] <= h - 1 - top + 12 and r["low"] >= h - 1 - bottom - 12
+            if at_side and span and inside and r["width"] < 0.6 * typical:
+                fake = True
+        if not fake:
+            keep.append(r)
+    return keep
+
+
+def _wick_mask(mask, h):
+    """Маска для фитилей: все непустые пиксели (нарисованные линии уже стёрты). Объём снизу
+    отделён от свечи промежутком — достраивание фитиля на нём останавливается."""
+    return mask
+
+
+def _zones_on_candles(df, boxes, h):
+    """Залитые прямоугольники → зоны на свечах: с какой свечи начинается, верх и низ (в «пикселях вверх»)."""
+    zones = []
+    xs = df["x"].to_numpy()
+    for left, top, right, bottom, _ in boxes:
+        inside = np.flatnonzero(xs >= left - 2)               # первая свеча у левого края зоны
+        start = int(inside[0]) if len(inside) else len(xs) - 1
+        end = int(np.argmin(np.abs(xs - right)))
+        zones.append({"start": start, "end": max(start, end),
+                      "top": float(h - 1 - top), "bottom": float(h - 1 - bottom)})
+    return zones
+
+
+def _lines_on_candles(df, lines, h):
+    """Нарисованные линии → в координатах свечей: x — номер свечи (дробный), y — «пиксели вверх»."""
+    xs = df["x"].to_numpy()
+    index = np.arange(len(xs), dtype=float)
+    result = []
+    for ln in lines:
+        x0, x1 = np.interp([ln.x1, ln.x2], xs, index)
+        result.append({"x0": float(x0), "x1": float(x1), "y0": float(h - 1 - ln.y1), "y1": float(h - 1 - ln.y2),
+                       "flat": abs(ln.angle) < 3})
+    return result
+
+
+def extract_marks(path):
+    """Свечи и всё, что ты нарисовал на скрине, в координатах свечей:
+    (свечи, закрашенные зоны, линии) — или (None, [], []), если свечей не видно."""
+    img, h, w, fg, mask, boxes = _prepare(path, with_boxes=True)
+    lines = PANEL["lines"]
+    if candle_ratio(mask) < CANDLE_MODE_RATIO:
+        return None, [], []                                # линейный график — свечей нет
+    rows = _drop_box_sides(_candle_rows(img, _colored(img, mask), h, _zone(), full=_wick_mask(mask, h)), boxes, h)
+    if len(rows) < MIN_CANDLES:
+        return None, [], []
+    df = _to_frame(rows, h)
+    zones = _zones_on_candles(df, boxes, h)
+    marks = _lines_on_candles(df, lines, h)
+    for extra in _zones_from_lines(marks, h):     # линии-границы зоны помечены "zone": True
+        same = any(abs(extra["start"] - z["start"]) <= 2 and min(extra["top"], z["top"]) - max(extra["bottom"], z["bottom"])
+                   > 0.5 * (extra["top"] - extra["bottom"]) for z in zones)
+        if not same:                              # рамка уже найденной залитой зоны — не вторая зона
+            zones.append(extra)
+    cols = ["open_time", "open", "high", "low", "close"] + (["volume"] if "volume" in df else [])
+    return df[cols], zones, marks
+
+
+def _zones_from_lines(marks, h):
+    """Узкая зона, у которой заливка не видна, — это две горизонтальные линии одна над другой
+    с общим началом и концом (верх и низ прямоугольника)."""
+    flat = [m for m in marks if m["flat"]]
+    zones = []
+    for i, a in enumerate(flat):
+        for b in flat[i + 1:]:
+            if a.get("zone") or b.get("zone"):
+                continue
+            gap = abs(a["y0"] - b["y0"])
+            if abs(a["x0"] - b["x0"]) <= 1.5 and abs(a["x1"] - b["x1"]) <= 2 and 3 <= gap <= 0.2 * h:
+                a["zone"] = b["zone"] = True
+                zones.append({"start": int(round(min(a["x0"], b["x0"]))), "end": int(round(max(a["x1"], b["x1"]))),
+                              "top": max(a["y0"], b["y0"]), "bottom": min(a["y0"], b["y0"])})
+    return zones
+
+
+def extract_candles_and_zones(path):
+    """То же, что extract_candles, плюс зоны, которые ты закрасил на скрине: (свечи, [зоны])."""
+    df, zones, _ = extract_marks(path)
+    return df, zones
+
+
+def extract_range(path):
+    """Скрин боковика, где ты НАРИСОВАЛ прямоугольник (и, может быть, профиль объёма с линией POC):
+    (свечи, боковик) или (свечи, None), если прямоугольника нет. Боковик — номера первой и последней
+    свечи внутри прямоугольника, верх и низ (в тех же «пикселях вверх», что и свечи) и POC."""
+    img, h, w, fg, mask, boxes = _prepare(path, with_boxes=True)
+    box = _box_lines(fg, w, h)
+    if box is None and boxes:                    # прямоугольник с заливкой: рамку стёрли вместе с ней
+        left, top, right, bottom, _ = max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+        box = (top, bottom, left, right)
+    if box is None:
+        return extract_candles(path), None
+    top, bottom, left, right = box
+    poc_y = _poc_row(fg, box)
+    # профиль объёма и линия POC — горизонтальные полосы: стираем их, чтобы не спутать со свечами
+    wide = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((1, 25), np.uint8))
+    clean = mask.copy()
+    clean[top:bottom + 1, left:right + 1] &= ~wide[top:bottom + 1, left:right + 1]
+    clean[max(0, top - 2):top + 3, left:right + 1] = 0                 # рамку прямоугольника — тоже
+    clean[bottom - 2:bottom + 3, left:right + 1] = 0
+    clean[top:bottom + 1, max(0, left - 2):left + 3] = 0                # и боковые стороны рамки
+    clean[top:bottom + 1, max(0, right - 2):right + 3] = 0
+    if candle_ratio(clean) < CANDLE_MODE_RATIO * 0.7:
+        return None, None
+    rows = _candle_rows(img, _colored(img, clean), h, _zone(), full=clean)
+    if len(rows) < MIN_CANDLES:
+        return None, None
+    df = _to_frame(rows, h)
+    inside = np.flatnonzero((df["x"] >= left - 2) & (df["x"] <= right + 2))
+    if len(inside) < 10:
+        return df, None
+    found = {"start": int(inside[0]), "end": int(inside[-1]),
+             "top": float(h - 1 - top), "bottom": float(h - 1 - bottom),
+             "poc": None if poc_y is None else float(h - 1 - poc_y)}
+    cols = ["open_time", "open", "high", "low", "close"] + (["volume"] if "volume" in df else [])
+    return df[cols], found

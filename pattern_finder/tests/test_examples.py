@@ -146,7 +146,7 @@ def test_scanner_writes_similarity_and_filters_unlike():
     assert found and all("similarity" in it for it in found.values())
     if len(found) == 2:
         assert found["LIKEUSDT"]["similarity"] > found["UNLIKEUSDT"]["similarity"]
-    assert "похоже на твой пример" in scanner.describe_item(found["LIKEUSDT"])
+    assert "%" not in scanner.describe_item(found["LIKEUSDT"])             # в выдаче чисел нет
     strict, _ = scanner.scan_user(patterns, ["4h"], fetch, ["LIKEUSDT", "UNLIKEUSDT"],
                                   {**settings, "similar_only": True})
     assert all(it["similarity"] >= 0.6 for c in strict for it in c["items"])
@@ -195,6 +195,135 @@ def test_bot_reads_smc_example_from_screenshot(tmp_path):
         bot.waiting[5] = "FVG"
         bot.handle_message({"chat": {"id": 5}, "photo": [{"file_id": "y"}]})
         assert "не нашёл «FVG»" in sent.messages[-1][0]
+    finally:
+        storage.FILE = original
+        sent.restore()
+
+
+# --- боковик: нарисованный прямоугольник + профиль объёма с POC ------------------------------------------
+def test_drawn_range_box_and_poc_are_read(tmp_path):
+    from screens import range_screenshot
+    from vision import extract_range
+    df = range_df().tail(200).reset_index(drop=True)
+    shot = range_screenshot(df, 50, 199, tmp_path / "range.png", poc=100.0)
+    candles, box = extract_range(shot)
+    assert box is not None and box["poc"] is not None
+    assert box["bottom"] < box["poc"] < box["top"]
+    assert 0.3 < (box["poc"] - box["bottom"]) / (box["top"] - box["bottom"]) < 0.7   # POC посередине
+    assert box["start"] > 0.15 * len(candles) and box["end"] >= len(candles) - 3          # прямоугольник справа
+    fp, item = fpm.range_from_box(candles, box)
+    assert fp["family"] == "range" and "length" not in fp["features"]
+    assert 0.3 < fp["features"]["poc_rel"] < 0.7 and fp["features"]["touches"] >= 4
+    assert fpm.kind_text(item) == "боковик по твоему прямоугольнику"
+    plain, none = extract_range(screenshot(df, tmp_path / "plain.png"))                   # без прямоугольника
+    assert none is None and plain is not None
+
+
+def test_bot_reads_drawn_range(tmp_path):
+    from screens import range_screenshot
+    sent = Sent()
+    original = storage.FILE
+    storage.FILE = str(tmp_path / "users.json")
+    bot.PATTERNS_DIR = str(tmp_path)
+    shot = range_screenshot(range_df().tail(200).reset_index(drop=True), 50, 199, tmp_path / "r.png", poc=100.0)
+    bot.download_photo = lambda file_id, path: shutil.copy(shot, path)
+    try:
+        bot.waiting[5] = "Range"
+        bot.handle_message({"chat": {"id": 5}, "photo": [{"file_id": "x"}]})
+        caption, _ = sent.photos[-1]
+        assert "нашёл твой прямоугольник и линию POC" in caption and "POC в" in caption and "%" not in caption
+        assert storage.get_patterns(5)[-1]["fingerprint"]["family"] == "range"
+    finally:
+        storage.FILE = original
+        sent.restore()
+
+
+# --- закрашенные зоны и картинки «пример с рынка» (обн. 30) ------------------------------------------
+def test_painted_zone_is_erased_and_used(tmp_path):
+    import cv2
+    import fingerprint
+    import vision
+    from screens import screenshot
+    df = ob_df(impulse=8, volume=3, seed=4)
+    plain = tmp_path / "plain.png"
+    screenshot(df, plain, theme="light", volume=False)
+    base = vision.extract_candles(str(plain))
+    # рисуем поверх полупрозрачный фиолетовый прямоугольник с рамкой — как в TradingView
+    img = cv2.imread(str(plain))
+    h, w = img.shape[:2]
+    x0, x1, y0, y1 = int(w * 0.55), int(w * 0.92), int(h * 0.2), int(h * 0.45)
+    overlay = img.copy()
+    cv2.rectangle(overlay, (x0, y0), (x1, y1), (230, 200, 235), -1)
+    img = cv2.addWeighted(overlay, 0.35, img, 0.65, 0)                  # прозрачность как в TradingView
+    cv2.rectangle(img, (x0, y0), (x1, y1), (190, 90, 170), 2)
+    painted = tmp_path / "painted.png"
+    cv2.imwrite(str(painted), img)
+    candles, zones = vision.extract_candles_and_zones(str(painted))
+    assert candles is not None and abs(len(candles) - len(base)) <= 3      # заливка не стала «свечами»
+    assert len(zones) == 1 and zones[0]["top"] > zones[0]["bottom"]
+    fp, item = fingerprint.screenshot_fingerprint("Order Block", candles, (), zones)
+    assert item is not None and fingerprint._zone_match(item, zones[0]) > 0 or item.get("from_zone")
+
+
+def test_bot_market_example_picture_is_read(tmp_path):
+    """Картинку «пример с рынка» (свечи + объём + подписи + зелёная зона) бот читает как график."""
+    import chart
+    import fingerprint
+    import vision
+    from smc import find_all_fvg
+    from market import candles_to_df
+    from test_eye import fake_market
+    df = candles_to_df(fake_market(31, 300)).tail(80).reset_index(drop=True)
+    fvg = max(find_all_fvg(df, lookback=len(df), include_filled=True), key=lambda f: f["zone"][1] - f["zone"][0])
+    path = tmp_path / "market.png"
+    chart.plot_example(df, "BTCUSDT", "4h", {**fvg, "name": "FVG"}, str(path), "BTCUSDT 4H — FVG")
+    candles, zones = vision.extract_candles_and_zones(str(path))
+    assert candles is not None and len(candles) >= 40                      # на картинке ~65 свечей окна
+    assert zones and zones[0]["top"] > zones[0]["bottom"]
+    fp, item = fingerprint.screenshot_fingerprint("FVG", candles, (), zones)
+    assert item["kind"] == fvg["kind"]
+
+
+def test_zone_outline_of_any_color_is_not_read_as_candles(tmp_path):
+    """Тёмная тема, зона с яркой голубой рамкой (как у пользователя): рамка не превращается в свечи."""
+    import cv2
+    import vision
+    import screen_exam
+    df = screen_exam.market(4).iloc[300:370].reset_index(drop=True)
+    plain = screen_exam.render(df, str(tmp_path / "plain.png"), "dark", (None, None), volume=False)
+    base = vision.extract_candles(plain)
+    img = cv2.imread(plain)
+    h, w = img.shape[:2]
+    x0, x1, y0, y1 = int(w * 0.45), int(w * 0.8), int(h * 0.3), int(h * 0.5)
+    overlay = img.copy()
+    cv2.rectangle(overlay, (x0, y0), (x1, y1), (90, 80, 20), -1)
+    img = cv2.addWeighted(overlay, 0.5, img, 0.5, 0)
+    cv2.rectangle(img, (x0, y0), (x1, y1), (220, 210, 120), 2)          # голубая рамка
+    path = str(tmp_path / "boxed.png")
+    cv2.imwrite(path, img)
+    candles, zones, _ = vision.extract_marks(path)
+    assert zones and abs(len(candles) - len(base)) <= 3
+
+
+def test_screenshot_caption_is_a_description(tmp_path):
+    """Подпись к скриншоту — описание словами: бот понимает его и сохраняет вместе с примером."""
+    from screens import range_screenshot
+    sent = Sent()
+    original = storage.FILE
+    storage.FILE = str(tmp_path / "users.json")
+    bot.PATTERNS_DIR = str(tmp_path)
+    shot = range_screenshot(range_df().tail(200).reset_index(drop=True), 50, 199, tmp_path / "r.png", poc=100.0)
+    bot.download_photo = lambda file_id, path: shutil.copy(shot, path)
+    try:
+        bot.waiting[5] = "Range"
+        bot.handle_message({"chat": {"id": 5}, "photo": [{"file_id": "x"}],
+                            "caption": "боковик на 4H, крупный, от 4 касаний"})
+        caption, keyboard = sent.photos[-1]
+        assert "Понял твоё описание" in caption and "4H" in caption and "не меньше 4" in caption
+        spec = storage.get_patterns(5)[-1]["spec"]
+        assert spec["timeframes"] == ["4h"] and spec["min_touches"] == 4 and "big" in spec["require"]
+        assert any("describe:" in (b.get("callback_data") or "") for row in keyboard["inline_keyboard"] for b in row)
+        assert 5 not in bot.pending_spec
     finally:
         storage.FILE = original
         sent.restore()

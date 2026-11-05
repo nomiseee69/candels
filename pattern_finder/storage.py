@@ -1,17 +1,28 @@
-"""Память бота: паттерны и настройки пользователей в users.json.
+"""Память бота: паттерны, настройки, оценки и подписки пользователей — в базе SQLite (users.db).
 
-Бот работает в несколько потоков (сканирование идёт в фоне), поэтому каждое изменение
-файла — «прочитать → поменять → записать» — делается под замком LOCK: иначе два потока
+Раньше всё лежало в одном файле users.json. Для одного человека это нормально, но когда
+пользователей десятки: файл переписывается целиком при каждом клике, и сбой посреди записи
+может его испортить. SQLite — это настоящая база данных в одном файле (встроена в Python,
+ставить ничего не нужно): запись идёт «транзакцией» — либо целиком, либо никак.
+
+Старый users.json при первом запуске сам переезжает в базу (файл переименовывается в
+users.json.migrated — это и есть резервная копия).
+
+Бот работает в несколько потоков (сканирование идёт в фоне), поэтому каждое изменение —
+«прочитать → поменять → записать» — делается под замком LOCK: иначе два потока
 прочитают старую версию, и изменения одного из них потеряются."""
 
 import functools
 import json
 import os
+import sqlite3
 import threading
 import time
 
-FILE = "users.json"
+FILE = "users.json"          # имя старого файла; база лежит рядом: users.db
 LOCK = threading.RLock()     # RLock: функция под замком может вызвать другую такую же
+BACKUP_DIR = "backups"
+BACKUP_KEEP = 7              # сколько последних ежедневных копий базы хранить
 
 
 def locked(func):
@@ -22,12 +33,44 @@ def locked(func):
     return wrapper
 
 
-@locked
-def load_users():
-    if not os.path.exists(FILE):
-        return {}
+def db_path():
+    base = FILE[:-5] if FILE.endswith(".json") else FILE
+    return base + ".db"
+
+
+def _connect():
+    connection = sqlite3.connect(db_path(), timeout=30)
+    connection.execute("PRAGMA journal_mode=WAL")       # чтение не ждёт записи
+    connection.execute("CREATE TABLE IF NOT EXISTS users (chat_id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+    connection.execute("CREATE TABLE IF NOT EXISTS payments (id TEXT PRIMARY KEY, chat_id TEXT, source TEXT, "
+                       "plan TEXT, amount REAL, currency TEXT, at REAL, status TEXT, data TEXT)")
+    return connection
+
+
+def _migrate():
+    """users.json → users.db один раз."""
+    if os.path.exists(db_path()) or not os.path.exists(FILE):
+        return
     with open(FILE, "r", encoding="utf-8") as f:
         users = json.load(f)
+    connection = _connect()
+    with connection:
+        connection.executemany("INSERT OR REPLACE INTO users VALUES (?, ?)",
+                               [(key, json.dumps(user, ensure_ascii=False)) for key, user in users.items()])
+    connection.close()
+    os.replace(FILE, FILE + ".migrated")
+    print(f"Перенёс {len(users)} пользователей из {FILE} в базу {db_path()}")
+
+
+@locked
+def load_users():
+    _migrate()
+    if not os.path.exists(db_path()):
+        return {}
+    connection = _connect()
+    rows = connection.execute("SELECT chat_id, data FROM users").fetchall()
+    connection.close()
+    users = {key: json.loads(data) for key, data in rows}
     # старые записи без id: используем путь к фото как id
     for user in users.values():
         for p in user.get("patterns", []):
@@ -38,12 +81,77 @@ def load_users():
 
 @locked
 def save_users(users):
-    # пишем во временный файл и подменяем: если программа упадёт посреди записи,
-    # users.json останется целым
-    tmp = FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, FILE)
+    """Записывает всех пользователей одной транзакцией: сбой посреди записи базу не испортит."""
+    connection = _connect()
+    with connection:
+        old = {row[0] for row in connection.execute("SELECT chat_id FROM users")}
+        connection.executemany("INSERT OR REPLACE INTO users VALUES (?, ?)",
+                               [(str(key), json.dumps(user, ensure_ascii=False)) for key, user in users.items()])
+        gone = old - {str(k) for k in users}
+        connection.executemany("DELETE FROM users WHERE chat_id = ?", [(k,) for k in gone])
+    connection.close()
+
+
+def get_user(chat_id):
+    return load_users().get(str(chat_id), {})
+
+
+@locked
+def update_user(chat_id, change):
+    """change(user) меняет запись пользователя на месте; результат change возвращается."""
+    users = load_users()
+    user = users.setdefault(str(chat_id), {"patterns": []})
+    result = change(user)
+    save_users(users)
+    return result
+
+
+# --- платежи: журнал для статистики и проверки повторов ------------------------------------------
+@locked
+def add_payment(payment_id, chat_id, source, plan, amount, currency, status="succeeded", data=None):
+    """True — платёж новый и записан; False — такой уже был (повторное уведомление)."""
+    connection = _connect()
+    with connection:
+        cursor = connection.execute(
+            "INSERT OR IGNORE INTO payments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (str(payment_id), str(chat_id), source, plan, float(amount), currency, time.time(), status,
+             json.dumps(data or {}, ensure_ascii=False)))
+    connection.close()
+    return cursor.rowcount == 1
+
+
+def payments(since=0):
+    if not os.path.exists(db_path()):
+        return []
+    connection = _connect()
+    rows = connection.execute("SELECT id, chat_id, source, plan, amount, currency, at, status FROM payments "
+                              "WHERE at >= ? ORDER BY at", (since,)).fetchall()
+    connection.close()
+    keys = ("id", "chat_id", "source", "plan", "amount", "currency", "at", "status")
+    return [dict(zip(keys, row)) for row in rows]
+
+
+# --- резервные копии -------------------------------------------------------------------------------
+@locked
+def backup(now=None):
+    """Копия базы в backups/users-ГГГГ-ММ-ДД.db (безопасно даже во время работы бота).
+    Хранит BACKUP_KEEP последних. Возвращает путь копии или None (базы ещё нет)."""
+    _migrate()
+    if not os.path.exists(db_path()):
+        return None
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    stamp = time.strftime("%Y-%m-%d", time.localtime(now or time.time()))
+    target = os.path.join(BACKUP_DIR, f"users-{stamp}.db")
+    source = _connect()
+    copy = sqlite3.connect(target)
+    with copy:
+        source.backup(copy)
+    copy.close()
+    source.close()
+    old = sorted(f for f in os.listdir(BACKUP_DIR) if f.startswith("users-") and f.endswith(".db"))
+    for name in old[:-BACKUP_KEEP]:
+        os.remove(os.path.join(BACKUP_DIR, name))
+    return target
 
 
 @locked
@@ -75,6 +183,25 @@ def add_pattern(chat_id, name, photo_path, note="", kind=None, reference=None, s
 
 def get_patterns(chat_id):
     return load_users().get(str(chat_id), {}).get("patterns", [])
+
+
+@locked
+def set_spec(chat_id, pattern_id, spec):
+    """Описание паттерна словами (language.parse) — к примеру pattern_id. Возвращает пример или None."""
+    users = load_users()
+    for p in users.get(str(chat_id), {}).get("patterns", []):
+        if p["id"] == pattern_id:
+            if spec:
+                p["spec"] = spec
+            else:
+                p.pop("spec", None)
+            save_users(users)
+            return p
+    return None
+
+
+def get_pattern(chat_id, pattern_id):
+    return next((p for p in get_patterns(chat_id) if p["id"] == pattern_id), None)
 
 
 @locked
@@ -173,10 +300,11 @@ def set_coins(chat_id, count):
 
 # --- настройки поиска ------------------------------------------------------------------------------
 DEFAULT_SETTINGS = {"fvg": "significant", "combos_only": False, "similar_only": False, "learn": True,
-                    "confluence_only": False, "ob_volume": True}
+                    "confluence_only": False, "ob_volume": True, "quality": "normal"}
 SETTING_VALUES = {"fvg": ["significant", "all"], "combos_only": [False, True],
                   "similar_only": [False, True], "learn": [True, False],
-                  "confluence_only": [False, True], "ob_volume": [True, False]}
+                  "confluence_only": [False, True], "ob_volume": [True, False],
+                  "quality": ["normal", "strict", "off"]}
 
 
 def get_settings(chat_id):

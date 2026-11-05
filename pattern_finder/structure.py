@@ -13,9 +13,10 @@ EQH / EQL (equal highs / lows) — два и больше свинга почт�
                             часто идёт, чтобы её снять.
 """
 
+import numpy as np
 import pandas as pd
 
-from texts import plural
+from texts import plural, where_text
 from trendlines import pivot_highs, pivot_lows
 
 ATR_PERIOD = 14
@@ -93,6 +94,28 @@ def structure_events(df, window=SWING_WINDOW):
     return events
 
 
+def context_level(df, events=None):
+    """Уровень, после пробоя которого меняется контекст рынка (смена тренда):
+    после слома ВВЕРХ — минимум между пробитым свингом и свечой слома (защищённый лой);
+    после слома ВНИЗ — максимум там же (защищённый хай). Пока цена его не пробила, тренд прежний.
+    Возвращает находку {"kind": "context", ...} или None."""
+    events = structure_events(df) if events is None else events
+    if not events:
+        return None
+    last = events[-1]
+    lows, highs = df["low"].to_numpy(float), df["high"].to_numpy(float)
+    s, e = int(last["start"]), int(last["end"])
+    if last["direction"] == "up":
+        i = s + int(np.argmin(lows[s:e + 1]))
+        level = float(lows[i])
+    else:
+        i = s + int(np.argmax(highs[s:e + 1]))
+        level = float(highs[i])
+    return {"kind": "context", "direction": last["direction"], "level": level, "start": i,
+            "end": len(df) - 1, "window": len(df) - i, "score": 1.0, "break": last,
+            "label": ("ниже" if last["direction"] == "up" else "выше") + f" {level:.6g} — смена тренда"}
+
+
 def find_break(df, kind, choose=None):
     """Свежий BOS или CHoCH (kind = "bos" / "choch") на последних свечах, или None."""
     n = len(df)
@@ -144,7 +167,7 @@ def _equal_side(df, side, sizes, window):
         spread = max(prices) - min(prices)
         distance = abs(last - level) / last
         if swept_at is None:
-            status = "ликвидность не снята, " + ("цена у уровня" if distance < 0.001 else f"до уровня {distance:.1%}")
+            status = "ликвидность не снята, " + ("цена у уровня" if distance < 0.001 else where_text(distance))
         else:
             back = closes[swept_at] < level if is_high else closes[swept_at] > level
             status = "ликвидность снята" + (" прострелом (закрылась обратно)" if back else "")

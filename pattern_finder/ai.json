@@ -1,0 +1,24 @@
+{
+  "eye": "chartnet",
+  "model": "models\\chartnet.npz",
+  "random_cos": 0.5934607982635498,
+  "exam": {
+    "hog": {
+      "precision": 0.2759581881533101,
+      "chance": 0.1335493774518165,
+      "random_cos": 0.36643053446149904,
+      "same_cos": 0.39734160400148827,
+      "cases": 287,
+      "patterns": 8
+    },
+    "chartnet": {
+      "precision": 0.3909407665505227,
+      "chance": 0.1335493774518165,
+      "random_cos": 0.5934607982635498,
+      "same_cos": 0.7061262726783752,
+      "cases": 287,
+      "patterns": 8
+    }
+  },
+  "checked_at": "2026-11-05 00:37"
+}

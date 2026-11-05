@@ -59,7 +59,7 @@ def use_storage(tmp_path):
 def test_main_menu_is_compact():
     names = [b["text"] for b in buttons(bot.menu_keyboard(1))]
     assert not set(names) & set(ALL_PATTERNS)
-    assert "📂 Мои паттерны" in names and "🔍 Сканировать" in names and "❓ Помощь" in names and len(names) == 8
+    assert "📂 Мои паттерны" in names and "🔍 Сканировать" in names and "❓ Помощь" in names and "💎 Подписка" in names and "👤 Профиль" in names and len(names) == 10
 
 
 def test_patterns_list_shows_all_and_pick_flow(tmp_path):
@@ -340,3 +340,23 @@ def test_demo_from_market_and_save(tmp_path):
         bot.PATTERNS_DIR, bot.top_symbols, bot.fetch_many, bot.start_job = saved
         storage.FILE = original
         rec.restore()
+
+
+def test_network_errors_hide_token_and_back_off():
+    import notifier
+    import requests
+    saved = notifier.TOKEN
+    notifier.TOKEN = "123:SECRET"
+    try:
+        error = requests.ConnectTimeout("HTTPSConnectionPool(host='api.telegram.org'): /bot123:SECRET/getUpdates")
+        assert "SECRET" not in notifier.safe_error(error) and "***" in notifier.safe_error(error)
+        bot_saved = bot.safe_error
+        bot.safe_error = notifier.safe_error
+        try:
+            hint = bot.network_hint(error, 1, 5)
+        finally:
+            bot.safe_error = bot_saved
+        assert "SECRET" not in hint and "TELEGRAM_PROXY" in hint
+    finally:
+        notifier.TOKEN = saved
+    assert [bot.network_wait(n) for n in (1, 2, 3, 4, 5, 9)] == [5, 10, 20, 40, 60, 60]

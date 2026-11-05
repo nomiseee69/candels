@@ -39,3 +39,34 @@ def screenshot(df, path, theme="dark", volume=True, width=10, height=6):
     fig.savefig(path, facecolor=bg)
     plt.close(fig)
     return str(path)
+
+
+def range_screenshot(df, start, end, path, poc=None, profile=True):
+    """Скрин «как у пользователя»: серый фон, чёрные свечи, нарисованный прямоугольник боковика,
+    белая линия POC и белый профиль объёма слева внутри прямоугольника."""
+    n = len(df)
+    fig = plt.figure(figsize=(8, 3), dpi=100)
+    fig.patch.set_facecolor("#b2b5b8")
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_facecolor("#b2b5b8")
+    o, h, lo, c = (df[k].to_numpy() for k in ("open", "high", "low", "close"))
+    for i in range(n):
+        ax.vlines(i, lo[i], h[i], color="black", linewidth=0.8)
+        ax.add_patch(plt.Rectangle((i - 0.3, min(o[i], c[i])), 0.6, max(abs(c[i] - o[i]), 1e-9), color="black"))
+    top, bottom = h[start:end + 1].max(), lo[start:end + 1].min()
+    ax.add_patch(plt.Rectangle((start - 0.5, bottom), end - start + 1, top - bottom, fill=False,
+                               edgecolor="black", linewidth=1.5))
+    if poc is not None:
+        ax.hlines(poc, start, start + (end - start) * 0.6, color="white", linewidth=1.5)
+    if profile:
+        levels = np.linspace(bottom, top, 30)
+        weights = np.exp(-((levels - (poc if poc is not None else (top + bottom) / 2)) / (top - bottom) * 4) ** 2)
+        for y, wgt in zip(levels, weights):
+            ax.add_patch(plt.Rectangle((start, y), (end - start) * 0.15 * wgt, (top - bottom) / 40,
+                                       color="white", alpha=0.9))
+    ax.set_xlim(-2, n + 2)
+    ax.set_ylim(lo.min() - (top - bottom) * 0.3, h.max() + (top - bottom) * 0.3)
+    ax.axis("off")
+    fig.savefig(path, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return str(path)

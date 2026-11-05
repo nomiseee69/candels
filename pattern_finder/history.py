@@ -6,6 +6,8 @@
 
 import numpy as np
 
+from texts import where_text
+
 from shape import normalize, resample
 from blocks import all_blocks
 from smc import find_all_fvg
@@ -46,7 +48,9 @@ def non_overlapping(found):
 
 
 # --- формы с картинки ---------------------------------------------------------------------------
-def history_shapes(df, shape, windows, min_score):
+def history_shapes(df, shape, windows, min_score, name=None):
+    """Все случаи формы за период. name — двойное дно / ГиП проверяются по точкам (shapes_check)."""
+    from shapes_check import shape_label, validate
     prices = df["close"].to_numpy()
     found = []
     for w in windows:
@@ -55,6 +59,19 @@ def history_shapes(df, shape, windows, min_score):
             score = float(np.corrcoef(shape, segment)[0, 1])
             if score >= min_score:
                 found.append({"start": start, "window": w, "score": score})
+    if name:                                  # сначала проверка по точкам, потом убираем пересечения
+        from structure import atr
+        sizes = atr(df).to_numpy()
+        checked = []
+        for f in found:
+            extra = validate(name, df, f["start"], f["window"], sizes)
+            if extra is None:
+                continue
+            f.update(extra)
+            if extra:
+                f["label"] = shape_label(name, extra)
+            checked.append(f)
+        found = checked
     found = non_overlapping(found)
     for f in found:
         f["outcome"] = outcome(df, f["start"] + f["window"] - 1)
@@ -120,10 +137,11 @@ def history_equal(df):
     return levels
 
 
-def history_blocks(df, family):
+def history_blocks(df, family, strict=True):
     """Все блоки семейства ("ob" / "breaker" / "mitigation") и что было после первого
-    возвращения цены в зону: оттолкнулась ли она в сторону блока."""
-    blocks = [blk for blk in all_blocks(df) if blk["family"] == family]
+    возвращения цены в зону: оттолкнулась ли она в сторону блока.
+    strict — только эталонные (сняли ликвидность, поглощение, объём — см. blocks.py)."""
+    blocks = [blk for blk in all_blocks(df) if blk["family"] == family and (not strict or blk.get("textbook", True))]
     for blk in blocks:
         touched = blk["touched_at"]
         blk["outcome"] = outcome(df, touched) if touched is not None else None
@@ -154,7 +172,7 @@ def summarize(name, family_kind, results):
         open_now = sum(r["filled_at"] is None for r in results)
         line = f"• {name}: {total} шт. (бычьих {bull}, медвежьих {total - bull}), сейчас открыто {open_now}"
         if judged:
-            line += f"\n   закрылись за {FVG_FILL_WINDOW} свечей: {len(quick)} из {len(judged)} ({len(quick) / len(judged):.0%})"
+            line += f"\n   закрылись за {FVG_FILL_WINDOW} свечей: {len(quick)} из {len(judged)}"
         return line
 
     if family_kind == "structure":
@@ -164,8 +182,7 @@ def summarize(name, family_kind, results):
         judged = [r for r in results if r.get("outcome")]
         if judged:
             followed = sum(_followed(r) for r in judged)
-            line += (f"\n   через {HORIZON} свечей цена ушла в сторону слома в {followed} из {len(judged)} "
-                     f"({followed / len(judged):.0%})")
+            line += f"\n   через {HORIZON} свечей цена ушла в сторону слома в {followed} из {len(judged)}"
         return line
 
     if family_kind == "eq":
@@ -185,7 +202,7 @@ def summarize(name, family_kind, results):
         if judged:
             held = sum(_held(r) for r in judged)
             line += (f"\n   после ретеста цена ушла в сторону блока в {held} из {len(judged)} "
-                     f"({held / len(judged):.0%}) за {HORIZON} свечей")
+                     f"за {HORIZON} свечей")
         return line
 
     line = f"• {name}: {plural(len(results), 'случай', 'случая', 'случаев')}"
@@ -208,9 +225,7 @@ def summarize(name, family_kind, results):
     judged = [r["outcome"] for r in results if r.get("outcome")]
     if judged:
         rose = sum(o["change"] > 0 for o in judged)
-        avg = np.mean([o["change"] for o in judged])
-        line += (f"\n   через {HORIZON} свечей цена выше в {rose} из {len(judged)} "
-                 f"({rose / len(judged):.0%}), в среднем {avg:+.1%}")
+        line += f"\n   через {HORIZON} свечей цена выше в {rose} из {len(judged)}"
     return line
 
 
@@ -231,7 +246,7 @@ def _date(df, i):
 def _result(o):
     if o is None:
         return "рано судить"
-    return f"{'↑' if o['change'] > 0 else '↓'} {o['change']:+.1%}"
+    return "↑" if o["change"] > 0 else "↓"
 
 
 def describe_occurrence(df, family_kind, f):
@@ -270,14 +285,14 @@ def coin_report(symbol, df, entries):
             if open_gaps:
                 g = min(open_gaps, key=lambda g: g["distance"])
                 bottom, top = g["zone"]
-                where = "цена внутри" if g["distance"] == 0 else f"до зоны {g['distance']:.1%}"
+                where = where_text(g["distance"], "цена внутри")
                 kind = "бычий" if g["kind"] == "bullish_fvg" else "медвежий"
                 line += f"\n   ближайший открытый: {kind} {bottom:.6g}–{top:.6g}, {where}"
             lines.append(line)
             continue
         if family_kind == "block":
-            active = [blk for blk in found if blk["broken_at"] is None]
-            line = f"• {name}: {len(found)} за период, действует {len(active)}"
+            active = [blk for blk in found if blk["broken_at"] is None and blk["touched_at"] is None]
+            line = f"• {name}: {len(found)} за период, не отработано {len(active)}"
             if active:
                 line += "\n   ближайший: " + min(active, key=lambda blk: blk["distance"])["label"]
             lines.append(line)
@@ -296,3 +311,23 @@ def coin_report(symbol, df, entries):
         more = len(found) - MAX_DATES
         lines.append(f"• {name} ×{len(found)}: {shown}" + (f" и ещё {more}" if more > 0 else ""))
     return "\n".join(lines)
+
+
+def read_lines_figure(name, path):
+    """Треугольник / клин / канал на СКРИНШОТЕ без нарисованных линий: читаем свечи и ищем
+    фигуру тем же правилом, что и на рынке. Возвращает (свечи, фигура) или None."""
+    from trendlines import FAMILY_BY_PATTERN, WINDOWS
+    from vision import extract_candles
+    df = extract_candles(path)
+    if df is None or len(df) < 30:
+        return None
+    n = len(df)
+    windows = [w for w in WINDOWS if w <= n] + [w for w in (40, 65, 100) if w <= n]   # как на рынке + промежуточные
+    found = history_lines(df, FAMILY_BY_PATTERN[name], windows, 0.6)
+    if not found:
+        return None
+    # фигура, ради которой делали скрин, обычно крупная и ближе к правому краю
+    target = n - max(3, int(0.12 * n))                 # обычно после фигуры на скрине ещё немного свечей
+    best = max(found, key=lambda f: f["window"] + f.get("touches", 0) * 3
+               - 1.5 * abs(f["start"] + f["window"] - target))
+    return df, best

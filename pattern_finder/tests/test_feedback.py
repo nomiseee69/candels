@@ -37,7 +37,7 @@ def test_rule_learned_from_votes():
     rules = learn_rules(votes)
     assert rules and rules[0]["feature"] == "touches" and rules[0]["op"] == ">="
     assert 5 < rules[0]["value"] <= 6
-    assert rule_text(rules[0]) == "касаний ≥ 6"
+    assert rule_text(rules[0]) == "много касаний"
     assert passes({"touches": 7}, rules[0]) and not passes({"touches": 5}, rules[0])
     assert passes({}, rules[0])                                 # нет признака — не отсекаем
 
@@ -67,4 +67,4 @@ def test_judge_filters_and_scores():
     assert judge("FVG", frame(), {"name": "FVG", "score": 0.9, "start": 1, "window": 2,
                                   "zone": (1, 2)}) == (True, None)     # не оценивал — как раньше
     text = summary(votes)
-    assert "• Канал: 👍 5, 👎 4" in text and "касаний ≥ 6" in text
+    assert "• Канал: 👍 5, 👎 4" in text and "много касаний" in text and "%" not in text

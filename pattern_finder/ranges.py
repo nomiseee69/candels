@@ -170,7 +170,7 @@ def _finish(df, found):
     return found
 
 
-def find_range(df, windows=WINDOWS):
+def find_range(df, windows=WINDOWS, extra=None):
     """Боковик «сейчас»: цена внутри него или только что пробила границу. Самый длинный."""
     n = len(df)
     arrays = _arrays(df)
@@ -189,7 +189,8 @@ def find_range(df, windows=WINDOWS):
                 continue                                      # всё ещё внутри — это окно с back = 0
             found["breakout"] = breakout
             found["window"] = n - start                        # до последней свечи — для разметки
-            rank = (found["score"], w, -back)
+            bonus = extra(df, {**found, "end": end}) if extra else 0           # описание словами
+            rank = (bonus, found["score"], w, -back)
             if best is None or rank > best[0]:
                 best = (rank, found)
             break

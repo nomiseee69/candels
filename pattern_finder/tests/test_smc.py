@@ -56,12 +56,14 @@ def test_partial_fill_is_reported():
         (100, 100.5, 99.5, 100.2),
         (100.2, 103.0, 100.1, 102.8),
         (102.8, 104.0, 102.0, 103.5),
-        (103.5, 103.6, 101.25, 101.5),  # залезла в дыру наполовину
+        (103.5, 103.6, 101.7, 101.9),  # залезла в дыру на 20% — ещё живой
     ]
     found = find_fvg(candles(rows))
     assert found is not None
-    assert abs(found["filled"] - 0.5) < 1e-9
+    assert abs(found["filled"] - 0.2) < 1e-9
     assert found["distance"] == 0          # цена сейчас внутри зоны
+    deeper = rows[:-1] + [(103.5, 103.6, 101.2, 101.9)]    # тенью до середины — отработан
+    assert find_fvg(candles(deeper)) is None or find_fvg(candles(deeper))["kind"] != "bullish_fvg"
 
 
 def test_tiny_gap_is_noise():

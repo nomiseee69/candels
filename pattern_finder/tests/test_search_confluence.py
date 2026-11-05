@@ -75,8 +75,11 @@ def test_scan_records_trends_of_all_timeframes():
 
 
 # --- поиск монеты ----------------------------------------------------------------------------------
-def test_find_coin_in_results_by_prefix_or_live():
+def test_find_coin_in_results_by_prefix_or_live(tmp_path):
     import bot
+    import storage
+    original_file = storage.FILE
+    storage.FILE = str(tmp_path / "users.json")          # не трогать настоящий users.json
     sent, messages, jobs = [], [], []
     saved = bot.send_card, bot.send_message, bot.start_job, bot.get_candles
     bot.send_card = lambda chat_id, card_id, c: sent.append((card_id, c["symbol"]))
@@ -108,3 +111,4 @@ def test_find_coin_in_results_by_prefix_or_live():
         assert sent[-1] == (ids[0], "SOLUSDT")                     # тикер текстом — тоже поиск
     finally:
         bot.send_card, bot.send_message, bot.start_job, bot.get_candles = saved
+        storage.FILE = original_file

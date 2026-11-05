@@ -42,7 +42,18 @@ def test_bullish_ob_retest_is_alerted():
     assert ob["touched_at"] is not None and ob["broken_at"] is None
     found = find_block(df, "ob")
     assert found is not None and found["kind"] == "bullish_ob"
-    assert "цена в зоне" in found["label"] and "тестировался" in found["label"]
+    assert "цена в зоне" in found["label"] and "первый ретест сейчас" in found["label"]
+
+
+def test_block_is_mitigated_after_first_retest():
+    """Цена зашла в блок, ушла и вернулась снова — блок уже отработан, не присылаем."""
+    import pandas as pd
+    df = path(BULLISH_OB + [(56, 100), (66, 89)])        # ушли вверх и вернулись второй раз
+    ob = [blk for blk in by_kind(all_blocks(df), "bullish_ob") if blk["start"] == 30][0]
+    assert ob["touched_at"] is not None and ob["touched_at"] < len(df) - 10
+    found = find_block(df, "ob")
+    assert found is None or found["start"] != 30
+    assert "отработан" in ob["label"]
 
 
 def test_block_is_known_only_after_the_break():
@@ -105,11 +116,11 @@ def test_scanner_alerts_order_block_retest():
     cards, _ = scanner.scan_user(patterns, ["4h"], lambda s, i, n: candles(False), ["AAAUSDT"],
                                  settings={"ob_volume": False})
     assert any(it["name"] == "Order Block" for c in cards for it in c["items"])
-    # объём ×3 на свече блока — присылаем, в описании «объём ×3.0»
+    # объём ×3 на свече блока — присылаем, в описании «повышенный объём» (без чисел)
     cards, skipped = scanner.scan_user(patterns, ["4h"], lambda s, i, n: candles(True), ["AAAUSDT"])
     assert skipped == [] and len(cards) == 1
     item = cards[0]["items"][0]
-    assert item["name"] == "Order Block" and "бычий OB" in item["label"] and "объём ×3.0" in item["label"]
+    assert item["name"] == "Order Block" and "бычий OB" in item["label"] and "повышенный объём" in item["label"]
     assert item["volume_high"] is True
 
 
@@ -118,9 +129,10 @@ def test_pine_draws_blocks():
     df = with_times(path(BREAKER))
     blocks = [{**blk, "name": "Order Block"} for blk in all_blocks(df)]
     code = pine_script("X", "4h", [(df, blocks, True)])
-    assert code.count("box.new(") == len(blocks)
+    alive = [blk for blk in blocks if blk["broken_at"] is None and blk["touched_at"] is None]
+    assert 1 <= code.count("box.new(") <= len(alive)      # пробитые и задетые блоки отработаны — не рисуем
     assert 'text="Breaker"' in code                       # живой breaker у цены — с подписью
-    assert code.count('text=""') == len(blocks) - 1       # остальные — история, без подписей
+    assert code.count('text=""') == 0                     # у каждой зоны есть подпись
     assert "border_style=line.style_dashed" in code       # breaker — пунктирная рамка
     assert "extend=extend.right" in code                  # действующий блок тянется вправо
 
@@ -134,3 +146,49 @@ def test_history_texts_for_blocks():
     assert "пробито" in text and "действует" in text
     report = coin_report("AAAUSDT", df, [("Order Block", "block", obs)])
     assert report.startswith("🪙 AAAUSDT") and "• Order Block:" in report
+
+
+def textbook_df(volume=3.0, engulf=True):
+    """Падение со свингами → свеча-OB (красная) прокалывает прошлый лой (сняла ликвидность) →
+    сразу резкая зелёная свеча закрывается выше её high → рост выше прошлых хаёв (слом)."""
+    import pandas as pd
+    import numpy as np
+    points = [100, 94, 98, 92, 96, 89, 93]                     # пила вниз с явными свингами
+    closes = list(np.concatenate([np.linspace(a, b, 7)[:-1] for a, b in zip(points, points[1:])]))
+    closes.append(points[-1])
+    opens = [closes[0]] + closes[:-1]
+    highs = [max(o, c) + 0.2 for o, c in zip(opens, closes)]
+    lows = [min(o, c) - 0.2 for o, c in zip(opens, closes)]
+    volumes = [1.0] * len(closes)
+    prev_low = min(lows)                                       # прошлый свинг-лой (89)
+    o = closes[-1]
+    opens.append(o); closes.append(o - 1.0); highs.append(o + 0.1); lows.append(prev_low - 1.0); volumes.append(volume)
+    ob_high = highs[-1]
+    nxt = ob_high + (1.5 if engulf else -0.6)
+    opens.append(closes[-1]); closes.append(nxt); highs.append(nxt + 0.1); lows.append(closes[-2] - 0.1)
+    volumes.append(volume)
+    for k in range(14):
+        c = closes[-1] + 1.2
+        opens.append(closes[-1]); closes.append(c); highs.append(c + 0.2); lows.append(closes[-2] - 0.2); volumes.append(1.0)
+    for k in range(6):
+        c = closes[-1] - 0.4
+        opens.append(closes[-1]); closes.append(c); highs.append(opens[-1] + 0.1); lows.append(c - 0.1); volumes.append(1.0)
+    df = pd.DataFrame({"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes})
+    df["open_time"] = pd.date_range("2026-01-01", periods=len(df), freq="4h", tz="UTC")
+    return df, len(points) * 6 - 6 + 1
+
+
+def test_textbook_order_block_needs_liquidity_engulfing_and_volume():
+    """Эталонный OB (как у трейдера): снял ликвидность, сразу резкая противоположная свеча
+    закрылась за его тенью, объём повышен. Без объёма или без поглощения — не эталон."""
+    from blocks import all_blocks
+
+    def block(**kw):
+        df, at = textbook_df(**kw)
+        found = [b for b in all_blocks(df) if b["kind"] == "bullish_ob" and abs(b["start"] - at) <= 1]
+        assert found, kw
+        return found[0]
+    good = block()
+    assert good["swept"] and good["engulfed"] and good["loud"] and good["textbook"]
+    assert not block(volume=1.0)["textbook"]                       # объём не повышен
+    assert not block(engulf=False)["textbook"]                     # следующая свеча не закрылась выше

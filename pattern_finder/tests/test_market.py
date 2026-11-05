@@ -128,7 +128,7 @@ def test_cards_overview_text():
     coins = scanner.group_by_coin([frame(f"C{i}USDT", "4h") for i in range(45)] + [frame("C0USDT", "1h")])
     text = scanner.cards_overview(coins, limit=40)
     assert text.startswith("📋 Ещё 45 монет с находками")
-    assert "• C0USDT — 1H: FVG, Треугольник (6 касаний) · 4H: FVG, Треугольник (6 касаний)" in text
+    assert "• C0USDT — 1H: FVG ↑, Треугольник · 4H: FVG ↑, Треугольник" in text
     assert text.endswith("…и ещё 5")
     assert scanner.cards_overview([]) == ""
 

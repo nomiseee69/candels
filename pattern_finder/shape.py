@@ -23,7 +23,9 @@ def resample(values, n):
 
 
 def photo_to_shape(path, n=SHAPE_POINTS):
-    """Скриншот → форма. Бросает ValueError, если график не распознан."""
+    """Скриншот → форма. Бросает ValueError, если график не распознан (или картинки нет)."""
+    if not path:
+        raise ValueError("нет картинки")
     analysis = analyze_screenshot(path)
     if not analysis.ok:
         raise ValueError("Не удалось распознать график на картинке")

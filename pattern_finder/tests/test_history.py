@@ -78,11 +78,11 @@ def test_history_fvg_and_summary():
     for g in gaps:
         g["_n"] = len(df)
     text = summarize("FVG", "fvg", gaps)
-    assert "закрылись за 20 свечей: 1 из 1 (100%)" in text
+    assert "закрылись за 20 свечей: 1 из 1" in text and "%" not in text
 
 
 def test_summary_shapes_text():
     results = [{"outcome": {"change": 0.02}}, {"outcome": {"change": -0.01}}, {"outcome": None}]
     text = summarize("Двойное дно", "shape", results)
     assert "3 случая" in text
-    assert "выше в 1 из 2 (50%)" in text
+    assert "выше в 1 из 2" in text and "%" not in text

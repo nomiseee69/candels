@@ -30,7 +30,7 @@ def plot_match(df, symbol, start, window_len, score, path):
     plt.figure(figsize=(12, 6))
     plt.plot(df["open_time"], df["close"], label=symbol)
     plt.axvspan(df.loc[start, "open_time"], df.loc[end, "open_time"],
-                color="orange", alpha=0.3, label=f"Совпадение {score:.0%}")
+                color="orange", alpha=0.3, label="Совпадение")
     plt.title(f"{symbol}: найденный паттерн")
     plt.legend()
     plt.xticks(rotation=45)
@@ -62,6 +62,14 @@ def _time_at(df, x):
         return df["open_time"].iloc[max(x, 0)]
     step = df["open_time"].iloc[-1] - df["open_time"].iloc[-2]
     return df["open_time"].iloc[-1] + step * (x - len(df) + 1)
+
+
+def _draw_points(ax, df, item, color="royalblue", width=2):
+    """Двойное дно / ГиП: ломаная через ключевые точки и пунктир шеи."""
+    xs = [_time_at(df, x) for x, _ in item["points"]]
+    ax.plot(xs, [y for _, y in item["points"]], color=color, linewidth=width, marker="o", markersize=4)
+    x0, y0, x1, y1 = item["neckline"]
+    ax.plot([_time_at(df, x0), _time_at(df, x1)], [y0, y1], color="darkorange", linestyle="--", linewidth=1.5)
 
 
 def _draw_range(ax, df, item, alpha):
@@ -109,12 +117,15 @@ def _history_on(ax, df, symbol, occurrences):
         if occ.get("kind") == "range":
             _draw_range(ax, df, occ, 0.2)
             continue
-        end = min(occ["start"] + occ["window"] - 1, len(df) - 1)
-        result = occ.get("outcome")
-        color = "gray" if result is None else ("seagreen" if result["change"] > 0 else "crimson")
-        ax.axvspan(df["open_time"].iloc[occ["start"]], df["open_time"].iloc[end], color=color, alpha=0.25)
-        if "upper" in occ:
+        if "upper" in occ:                       # фигура — её линии
             _draw_figure(ax, df, {**occ, "touch_points": []}, colors=("black", "black"), width=1.5)
+            continue
+        if occ.get("points"):                    # двойное дно / ГиП — по точкам
+            _draw_points(ax, df, occ, color="black", width=1.5)
+            continue
+        end = min(occ["start"] + occ["window"] - 1, len(df) - 1)     # форма — участок цены жирнее
+        part = df.iloc[occ["start"]:end + 1]
+        ax.plot(part["open_time"], part["close"], color="black", linewidth=2.2)
 
 
 def _findings_on(ax, df, symbol, items):
@@ -132,15 +143,17 @@ def _findings_on(ax, df, symbol, items):
             _zone(ax, df, item, 0.25)
         if item.get("kind") == "range":
             _draw_range(ax, df, item, 0.2)
+        if item.get("points"):
+            _draw_points(ax, df, item)
     ax.legend(loc="upper left", fontsize=8)
 
 
 def plot_history(df, symbol, occurrences, path):
-    """Все прошлые случаи паттерна на графике. Цвет полосы — что было после:
-    зелёный — цена выросла, красный — упала, серый — ещё рано судить."""
+    """Все прошлые случаи паттерна на графике: фигуры — линиями, формы — жирным участком цены,
+    зоны и уровни — как в алертах (без цветных полос — они мешали смотреть)."""
     fig, ax = plt.subplots(figsize=(12, 6))
     _history_on(ax, df, symbol, occurrences)
-    ax.set_title(f"{symbol}: история — зелёный = цена потом выросла, красный = упала")
+    ax.set_title(f"{symbol}: прошлые случаи твоих паттернов")
     fig.autofmt_xdate()
     fig.tight_layout()
     fig.savefig(path)
@@ -279,7 +292,12 @@ def plot_example(df, symbol, interval, item, path, title=None, dates=True):
                     ax.add_patch(plt.Rectangle((hi + 2, center - bar / 2), width * value / profile.max(),
                                                bar * 0.9, color="steelblue", alpha=0.5))
                 right = hi + 2 + width
-    if "zone" not in item and "upper" not in item and "level" not in item and kind != "range":
+    if item.get("points"):                                   # двойное дно / ГиП: точки и шея
+        ax.plot([x for x, _ in item["points"]], [y for _, y in item["points"]], color="royalblue",
+                linewidth=2, marker="o")
+        x0, y0, x1, y1 = item["neckline"]
+        ax.plot([x0, x1], [y0, y1], color="darkorange", linestyle="--", linewidth=1.5)
+    elif "zone" not in item and "upper" not in item and "level" not in item and kind != "range":
         ax.axvspan(start - 0.5, end + 0.5, color="orange", alpha=0.15)     # паттерн по форме
 
     ax.set_xlim(lo - 1, right + 1)

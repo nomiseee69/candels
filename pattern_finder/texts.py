@@ -10,25 +10,40 @@ def plural(n, one, few, many):
     return f"{n} {many}"
 
 
-def _example(item):
-    """«пример» или «пример №2», если примеров у паттерна несколько."""
-    return f"пример №{item['example']}" if item.get("example") else "пример"
+def direction_arrow(item):
+    """↑ / ↓ для паттернов с направлением, пусто — для фигур без направления."""
+    kind = str(item.get("kind", ""))
+    if kind.startswith("bullish") or item.get("direction") == "up":
+        return " ↑"
+    if kind.startswith("bearish") or item.get("direction") == "down":
+        return " ↓"
+    return ""
+
+
+def where_text(distance, inside="цена в зоне"):
+    """Где цена относительно зоны / уровня — словами, без процентов."""
+    if distance == 0:
+        return inside
+    return "цена рядом" if distance <= 0.01 else "цена недалеко" if distance <= 0.05 else "цена далеко"
+
+
+def finding_name(item):
+    """Как находка выглядит в выдаче: только паттерн и направление — «Order Block ↑».
+    Никаких процентов и статистики: сила находки решает, ЧТО прислать, а не печатается."""
+    return f"{item['name']}{direction_arrow(item)}"
 
 
 def quality_text(item):
-    """Честная подпись к находке:
-    фигуры из линий — число касаний (через 2 точки прямая проходит всегда, важны касания);
-    паттерны по форме — схожесть с твоим скрином; SMC по правилам — без процентов
-    (правило либо выполнено, либо нет, а детали — в описании)."""
-    if isinstance(item.get("touches"), int):          # у EQH/EQL touches — список свечей, не число
-        text = plural(item["touches"], "касание", "касания", "касаний")
-        if item.get("similarity") is not None:
-            text += f", похоже на твой {_example(item)} {item['similarity']:.0%}"
-        return text
-    if "kind" not in item and "zone" not in item and "level" not in item:
-        if item.get("builtin"):
-            return f"похоже на эталон {item['score']:.0%}"
-        return f"похоже на твой {_example(item)} {item['score']:.0%}"
-    if item.get("similarity") is not None:            # SMC: похожесть на отпечаток твоего примера
-        return f"похоже на твой {_example(item)} {item['similarity']:.0%}"
+    """Раньше — «похоже на N%», «шанс реакции N%». Числа в выдаче больше не пишем."""
     return ""
+
+
+def similarity_words(value):
+    """Похожесть на пример словами (для подписи к сохранённому примеру и т.п.)."""
+    if value is None:
+        return ""
+    if value >= 0.8:
+        return "очень похож на твой пример"
+    if value >= 0.6:
+        return "похож на твой пример"
+    return "отдалённо похож на твой пример"

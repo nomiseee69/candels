@@ -54,12 +54,12 @@ def test_one_pine_for_all_timeframes():
     df_1h, df_4h = frame_df(freq="h"), frame_df(freq="4h")
     groups = [(df_1h, [FVG], False, "1h"), (df_4h, [OB], True, "4h"), (df_4h, [], False, "4h")]
     code = pine_script("SOLUSDT", "1h", groups)
-    assert 'indicator("Pattern Finder v20 · SOLUSDT 1H 4H"' in code
+    assert 'indicator("Pattern Finder v41 · SOLUSDT 1H 4H"' in code
     assert 'show_1h = input.bool(true, "1H", group="Таймфреймы")' in code and 'show_4h = input.bool(true, "4H"' in code
     assert "chart_seconds = timeframe.in_seconds()" in code
-    assert "    if show_4h and (not only_higher or chart_seconds <= 14400)" in code
+    assert "if barstate.islast and show_4h and (not only_higher or chart_seconds <= 14400)" in code
     assert 'text="1H FVG"' in code and 'text="4H OB"' in code             # подписи с таймфреймом
-    body = code.split("if barstate.islast")[1]
+    body = code.split("chart_seconds = timeframe.in_seconds()")[1]
     assert body.index("show_1h") < body.index("show_4h")
     text = pine_help("SOLUSDT", "1h", groups)
     assert "таймфреймы 1H, 4H в одном файле" in text and "Сейчас найдено: 1H: FVG" in text
@@ -76,7 +76,7 @@ def test_pine_keeps_current_objects_when_over_limit():
              "zone": (100.0, 101.0), "filled_at": i + 1} for i in range(600)]
     now = [{**FVG, "start": 690}]
     code = pine_script("X", "1h", [(df, past, True, "1h"), (frame_df(freq="4h"), now, False, "4h")])
-    assert code.count("box.new(") <= 450
+    assert code.count("box.new(") <= 200
     assert 'text="4H FVG"' in code                                       # текущая находка не выброшена
 
 
@@ -123,22 +123,54 @@ def test_only_nearest_live_zones_are_shown():
     far = [fvg_at(130)]                                 # дальше 15% — не показываем
     layers = plan([(df, above + below + far, True, "4h")])["4h"]
     alive = sorted(it["zone"][0] for _, it in layers["alive"])
-    assert alive == [95, 101]                           # по одной ближайшей сверху и снизу
-    assert len(layers["past"]) == 8                     # остальные — в скрытой истории
+    assert alive == [94, 95, 101, 102]                  # по две ближайшие сверху и снизу
+    assert layers["past"] == []                         # остальные зоны не рисуем вовсе
 
 
 def test_same_zone_on_two_timeframes_is_drawn_once():
     from pine import plan
     zone_1h = fvg_at(101.0)
-    zone_4h = {**fvg_at(100.9), "zone": (100.9, 101.6)}
+    zone_4h = {**fvg_at(100.95), "zone": (100.95, 101.5)}
+    layers = plan([(frame_df(freq="h"), [zone_1h], True, "1h"), (frame_df(), [zone_4h], True, "4h")])
+    assert layers["1h"]["alive"] == []                  # прошлая зона-дубль — остаётся на старшем ТФ
+    assert len(layers["4h"]["alive"]) == 1
+    # находка «сейчас» рисуется всегда: в алерте написано 1H FVG — на графике он есть
     layers = plan([(frame_df(freq="h"), [zone_1h], False, "1h"), (frame_df(), [zone_4h], False, "4h")])
-    assert layers["1h"]["now"] == []                    # остаётся на старшем ТФ
-    assert len(layers["4h"]["now"]) == 1
+    assert len(layers["1h"]["now"]) == 1 and len(layers["4h"]["now"]) == 1
+
+
+def test_small_zone_inside_big_zone_is_kept():
+    """4H FVG внутри 12H FVG — не дубль: он точнее показывает зону реакции."""
+    from pine import plan
+    small = {**fvg_at(101.0), "zone": (101.0, 101.4)}
+    big = {**fvg_at(100.8), "zone": (100.8, 102.0)}
+    layers = plan([(frame_df(freq="h"), [small], True, "4h"), (frame_df(), [big], True, "12h")])
+    assert len(layers["4h"]["alive"]) == 1 and len(layers["12h"]["alive"]) == 1
+
+
+def test_trend_change_on_same_price_is_one_label():
+    from pine import pine_script
+    df_4h, df_12h = frame_df(freq="4h"), frame_df(freq="12h")
+    level = {"kind": "context", "direction": "down", "level": 105.0, "start": 20, "end": 20, "window": 1,
+             "score": 1.0}
+    import pine
+    original = pine.plan
+    try:
+        layers = original([(df_4h, [], True, "4h"), (df_12h, [], True, "12h")])
+        layers["4h"]["past"].append((df_4h, {**level, "name": "Смена тренда"}))
+        layers["12h"]["past"].append((df_12h, {**level, "level": 105.1, "name": "Смена тренда"}))
+        pine._merge_context(layers, ["4h", "12h"])
+        assert layers["4h"]["past"] == [] and layers["12h"]["past"][0][1]["also"] == ["4h"]
+        pine.plan = lambda groups: layers
+        code = pine_script("SOLUSDT", "4h", [(df_4h, [], True, "4h"), (df_12h, [], True, "12h")])
+        assert "4H · 12H смена тренда ↑ выше" in code and code.count("смена тренда") == 1
+    finally:
+        pine.plan = original
 
 
 def test_summary_table_in_corner():
     df_1h, df_4h = frame_df(freq="h"), frame_df(freq="4h")
     code = pine_script("SOLUSDT", "1h", [(df_1h, [FVG], False, "1h"), (df_4h, [OB], False, "4h")])
     assert "table.new(position.top_right, 3, 3" in code
-    assert 'table.cell(pf_table, 0, 1, "1H"' in code and 'table.cell(pf_table, 2, 2, "Order Block ↓"' in code
-    assert code.index("if show_table") > code.index("if show_1h")
+    assert 'table.cell(pf_table, 0, 1, "1H"' in code and 'table.cell(pf_table, 2, 2, "OB ↓"' in code
+    assert code.index("if barstate.islast and show_table") > code.index("show_1h and")
