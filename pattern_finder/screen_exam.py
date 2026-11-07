@@ -246,7 +246,8 @@ def run(patterns=ALL_PATTERNS, per_pattern=6, seeds=(1, 2, 3), say=print):
             for k in range(per_pattern * len(seeds)):
                 window_df, key = planted(name, 100 + k)
                 theme = "dark" if k % 2 else "light"
-                path = render(window_df, os.path.join(folder, f"shape_{k}.png"), theme)
+                # половина скринов — без объёма: свечи тогда доходят до самого низа картинки
+                path = render(window_df, os.path.join(folder, f"shape_{k}.png"), theme, volume=k % 4 < 2)
                 try:
                     ok, seen = check(name, {"key": key}, window_df, path)
                 except Exception as error:
@@ -270,7 +271,8 @@ def run(patterns=ALL_PATTERNS, per_pattern=6, seeds=(1, 2, 3), say=print):
                 if name in LINE_PATTERNS and k % 2:
                     drawing = (None, None)                   # половину фигур — без нарисованных линий
                 theme = "dark" if (seed + k) % 2 else "light"
-                path = render(window_df, os.path.join(folder, f"{seed}_{k}.png"), theme, drawing)
+                path = render(window_df, os.path.join(folder, f"{seed}_{k}.png"), theme, drawing,
+                              volume=k % 4 < 2)
                 try:
                     ok, seen = check(name, local, window_df, path)
                 except Exception as error:                 # экзамен не должен падать

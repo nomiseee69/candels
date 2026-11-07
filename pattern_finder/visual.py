@@ -178,11 +178,11 @@ def load_config(path=CONFIG):
         with open(path, encoding="utf-8") as f:
             config = json.load(f)
         if config.get("eye") == "neural":
-            eye = load_neural(config["model"])
+            eye = load_neural(config["model"].replace("\\", "/"))
             use_eye(f"нейросеть ({config.get('model_name', eye.name)})", eye, config["random_cos"])
         elif config.get("eye") == "chartnet":                    # своя сеть, обученная на графиках
             import chartnet
-            eye = chartnet.load(config["model"])
+            eye = chartnet.load(config["model"].replace("\\", "/"))
             use_eye(f"своя нейросеть (обучена на {eye.cases} случаях)", eye, config["random_cos"])
     except Exception as error:                            # нет onnxruntime, нет файла модели…
         print("Нейросеть не загрузилась, работаю с HOG:", error)

@@ -524,12 +524,14 @@ def _groups(cols):
         gaps = np.diff(centers)
         # (только если за пропуском — 1–3 «островка»: подписи, а не свечи; свечи за пропуском
         # бывают — например, бледные свечи, которые не прошли проверку цвета)
+        # (или кучка обрывков уже 4 свечей — цифры шкалы цены, у них цветные края букв)
         far = [i for i in range(max(0, len(gaps) - 8), len(gaps))
-               if gaps[i] > 2.2 * step and len(gaps) - i <= 3]
+               if gaps[i] > 2.2 * step and (len(gaps) - i <= 3 or centers[-1] - centers[i + 1] < 4 * step)]
         if far:
             result, centers = result[:far[0] + 1], centers[:far[0] + 1]
         gaps = np.diff(centers)
-        far = [i for i in range(min(8, len(gaps))) if gaps[i] > 2.2 * step and i + 1 <= 3]
+        far = [i for i in range(min(8, len(gaps)))
+               if gaps[i] > 2.2 * step and (i + 1 <= 3 or centers[i] - centers[0] < 4 * step)]
         if far:
             result, centers = result[far[-1] + 1:], centers[far[-1] + 1:]
 
@@ -728,9 +730,15 @@ def _erase_outline(clean, img, box, background, reach=14):
         line = c1 - c0 + 1
         # свеча стоит ровно на стороне рамки и продолжается за её пределы (выше или ниже) — не трогаем
         beyond = lambda rows: max((differs[rows, x].sum() for x in range(c0, c1 + 1)), default=0)
-        if beyond(slice(max(0, y0 - 9), max(0, y0 - 1))) >= 5 or beyond(slice(min(h, y1 + 2), min(h, y1 + 10))) >= 5:
-            continue
+        # свеча стоит ровно на стороне рамки и продолжается за её пределы — стираем только
+        # пиксели цвета рамки (свеча другого цвета остаётся целой)
+        candle_on_side = (beyond(slice(max(0, y0 - 9), max(0, y0 - 1))) >= 5
+                          or beyond(slice(min(h, y1 + 2), min(h, y1 + 10))) >= 5)
         for y in range(y0, y1 + 1):
+            if candle_on_side:
+                part = clean[y, c0:c1 + 1]
+                part[np.abs(img[y, c0:c1 + 1].astype(int) - color).sum(axis=-1) < 110] = background.astype(np.uint8)
+                continue
             # сплошной «не фон» вокруг рамки в этой строке: если он намного шире самой линии —
             # рядом тело свечи, строку не трогаем
             lo = c0
@@ -900,9 +908,32 @@ def _prepare(path, with_boxes=False):
 PANEL = {"cropped": False, "lines": []}   # вырезали ли главный график из рамки; нарисованные линии
 
 
-def _zone():
-    """Где кончаются свечи: внизу обычного скрина бывает объём, в вырезанной рамке — нет."""
-    return 1.01 if PANEL["cropped"] else CANDLE_ZONE
+def _has_volume(mask, h):
+    """Внизу скрина есть объём: много столбиков, которые стоят на ОДНОЙ линии-основании
+    в нижней трети. У свечей низ разный — если основания нет, внизу просто свечи
+    (цена ушла вниз), и их нельзя отрезать как «объём»."""
+    bottoms = []
+    for x in range(mask.shape[1]):
+        runs = _runs(np.where(mask[:, x] > 0)[0])
+        low = [r for r in runs if r[0] >= VOLUME_ZONE * h]
+        if low:
+            bottoms.append(low[-1][1])
+    if len(bottoms) < 0.08 * mask.shape[1]:
+        return False
+    counts = np.bincount(bottoms)
+    base = int(np.argmax(counts))
+    same = sum(1 for b in bottoms if abs(b - base) <= 1)
+    return same >= 0.6 * len(bottoms) and same >= 0.08 * mask.shape[1]
+
+
+def _zone(mask=None, h=None):
+    """Где кончаются свечи: внизу обычного скрина бывает объём, в вырезанной рамке — нет.
+    Объёма не видно — свечи могут быть до самого низа картинки."""
+    if PANEL["cropped"]:
+        return 1.01
+    if mask is not None and h is not None and not _has_volume(mask, h):
+        return 1.01
+    return CANDLE_ZONE
 
 
 def _colored(img, mask):
@@ -932,7 +963,8 @@ def _drop_box_sides(rows, boxes, h):
         for left, top, right, bottom, _ in boxes:
             at_side = min(abs(r["x"] - left), abs(r["x"] - right)) <= max(4, typical)
             span = (r["high"] - r["low"]) >= 0.8 * (bottom - top)
-            inside = r["high"] <= h - 1 - top + 12 and r["low"] >= h - 1 - bottom - 12
+            reach = max(12, 3 * typical)          # к рамке может прилипнуть маленькая свеча рядом
+            inside = r["high"] <= h - 1 - top + reach and r["low"] >= h - 1 - bottom - reach
             if at_side and span and inside and r["width"] < 0.6 * typical:
                 fake = True
         if not fake:
@@ -978,7 +1010,7 @@ def extract_marks(path):
     lines = PANEL["lines"]
     if candle_ratio(mask) < CANDLE_MODE_RATIO:
         return None, [], []                                # линейный график — свечей нет
-    rows = _drop_box_sides(_candle_rows(img, _colored(img, mask), h, _zone(), full=_wick_mask(mask, h)), boxes, h)
+    rows = _drop_box_sides(_candle_rows(img, _colored(img, mask), h, _zone(mask, h), full=_wick_mask(mask, h)), boxes, h)
     if len(rows) < MIN_CANDLES:
         return None, [], []
     df = _to_frame(rows, h)
@@ -1039,7 +1071,7 @@ def extract_range(path):
     clean[top:bottom + 1, max(0, right - 2):right + 3] = 0
     if candle_ratio(clean) < CANDLE_MODE_RATIO * 0.7:
         return None, None
-    rows = _candle_rows(img, _colored(img, clean), h, _zone(), full=clean)
+    rows = _candle_rows(img, _colored(img, clean), h, _zone(clean, h), full=clean)
     if len(rows) < MIN_CANDLES:
         return None, None
     df = _to_frame(rows, h)
