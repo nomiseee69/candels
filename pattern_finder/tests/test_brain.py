@@ -102,10 +102,11 @@ def chat_bot(tmp_path):
 
 def test_free_text_description_goes_to_the_pattern(tmp_path):
     bot, storage, rec, original, pid = chat_bot(tmp_path)
-    fake = FakeBrain([{"intent": "describe", "pattern": "Order Block", "coin": ""},
-                      spec_answer(explain="OB со свипом", require=["liquidity"])])
+    # паттерн назван и словарь понял условия — нейросеть не спрашиваем «что ты хочешь», сразу описание
+    fake = FakeBrain([spec_answer(explain="OB со свипом", require=["liquidity"])])
     try:
         bot.handle_message({"chat": {"id": 5}, "text": "хочу чтобы мои ордерблоки были только после свипа"})
+        assert len(fake.asked) == 1
         assert "Запомнил для «Order Block» (2 примера)" in rec.sent[-1][0] and "🧠 OB со свипом" in rec.sent[-1][0]
         assert all("liquidity" in p["spec"]["require"] for p in storage.get_patterns(5))
     finally:
@@ -153,3 +154,48 @@ def test_brain_json_without_package_or_model_means_dictionary(tmp_path):
         assert "словар" in brain.status()
     finally:
         brain.load_config = saved
+
+
+
+def test_model_mistakes_are_corrected_by_dictionary():
+    """Ошибки маленькой модели, замеченные на сервере: «стопы под лоями» = бычий, а она сказала медвежий;
+    у FVG «имбаланс внутри» бессмыслен; «не перекрыли» = свежая; «крупная» — она додумала."""
+    fake = FakeBrain([spec_answer(explain="Медвежий OB", require=["liquidity", "volume"], direction="down"),
+                      spec_answer(explain="FVG", require=["imbalance"], prefer=["near_price", "trend", "big"])])
+    try:
+        ob = language.understand("ОБ, с которого ушли с отрывом, и чтоб до этого выбило стопы под лоями, объём жирный",
+                                 "Order Block")
+        assert ob["direction"] == "up" and "direction" in ob["doubts"]
+        fvg = language.understand("имба, которую ещё не перекрыли, рядом с ценой, по тренду, на старших тф", "FVG")
+        assert "imbalance" not in fvg["require"] + fvg["prefer"] and "fresh" in fvg["require"]
+        assert "big" in fvg["guessed"] and "fresh" not in fvg["guessed"]
+        assert fvg["timeframes"] == ["12h", "1d", "1w"]
+    finally:
+        fake.restore()
+
+
+def test_user_fixes_what_bot_understood_with_buttons(tmp_path):
+    """Под «понял так» — кнопки: убрать лишнее условие, направление наоборот, всё верно."""
+    bot, storage, rec, original, pid = chat_bot(tmp_path)
+    saved = brain.load_config
+    brain.load_config = lambda: {}
+    try:
+        bot.receive_description(5, pid, "бычий ОБ со снятием ликвидности и объёмом, на 4ч")
+        text, keyboard = rec.sent[-1][0], rec.sent[-1][1]
+        datas = [b["callback_data"] for row in keyboard["inline_keyboard"] for b in row]
+        assert "Всё верно?" in text and f"spok:{pid}" in datas and f"spflip:{pid}" in datas
+        assert f"sprm:{pid}:volume" in datas and f"sprm:{pid}:tf" in datas
+        press = lambda data: bot.handle_callback({"id": "q", "data": data, "from": {"id": 5},
+                                                  "message": {"chat": {"id": 5}, "message_id": 77}})
+        press(f"sprm:{pid}:volume")
+        spec = storage.get_pattern(5, pid)["spec"]
+        assert "volume" not in spec["require"] and "liquidity" in spec["require"]
+        press(f"spflip:{pid}")
+        assert storage.get_pattern(5, pid)["spec"]["direction"] == "down"
+        press(f"sprm:{pid}:tf")
+        assert storage.get_pattern(5, pid)["spec"]["timeframes"] == []
+        press(f"spok:{pid}")
+    finally:
+        brain.load_config = saved
+        rec.restore()
+        storage.FILE = original

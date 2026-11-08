@@ -503,6 +503,16 @@ def _columns(mask, hsv, h, zone=CANDLE_ZONE):
     return cols
 
 
+def _rectangle(cols, group):
+    """Широкая группа столбцов с одинаковым верхом и низом — нарисованный прямоугольник
+    (ярлык с текстом, таблица индикатора, залитая зона, «позиция»). У подряд идущих свечей
+    верх и низ разные."""
+    tops = np.array([cols[x][0] for x in group])
+    bottoms = np.array([cols[x][1] for x in group])
+    return (np.mean(np.abs(tops - np.median(tops)) <= 2) >= 0.8
+            and np.mean(np.abs(bottoms - np.median(bottoms)) <= 2) >= 0.8)
+
+
 def _groups(cols):
     """Соседние столбцы одного цвета без пропуска — одна свеча. Слишком широкие группы
     (свечи вплотную) делим по типичной ширине свечи."""
@@ -530,6 +540,8 @@ def _groups(cols):
     groups = merged
     result = []
     for g in groups:
+        if len(g) > 3 * max(width, 2) and _rectangle(cols, g):
+            continue                       # ровный цветной прямоугольник — ярлык, таблица, зона, а не свечи
         parts = max(1, round(len(g) / width)) if len(g) > 2.5 * width else 1
         result += [list(p) for p in np.array_split(g, parts)]
     # по краям отбрасываем «острова» после большого пропуска и узкие обрывки
@@ -621,11 +633,66 @@ def _wick(full, x_range, top, bottom, gap=2):
     return min(top, new_top), max(bottom, new_bottom)
 
 
+def _drop_strays(rows, window=4, far=6.0):
+    """График непрерывный: каждая свеча рядом по цене с соседями. Обрывки подписей сверху
+    (тикер, цены), шкалы времени и логотипа снизу стоят далеко от соседей и маленькие — убираем.
+    Большую свечу (импульс) не трогаем, даже если она далеко."""
+    if len(rows) < 2 * window + 3:
+        return rows
+    sizes = np.array([r["high"] - r["low"] for r in rows])
+    typical = max(float(np.median(sizes)), 1.0)
+    # 6+ «свечей» подряд с ОДИНАКОВЫМ верхом и низом и крупнее обычной — это залитая зона / плашка
+    flat = np.zeros(len(rows), bool)
+    start = 0
+    for i in range(1, len(rows) + 1):
+        same = i < len(rows) and abs(rows[i]["high"] - rows[start]["high"]) <= 2 \
+            and abs(rows[i]["low"] - rows[start]["low"]) <= 2
+        if not same:
+            if i - start >= 6 and sizes[start] >= 2 * typical:
+                flat[start:i] = True
+            start = i
+    rows = [r for r, f in zip(rows, flat) if not f]
+    if len(rows) < 2 * window + 3:
+        return rows
+    mids = np.array([(r["high"] + r["low"]) / 2 for r in rows])
+    sizes = np.array([r["high"] - r["low"] for r in rows])
+    keep = []
+    for i, r in enumerate(rows):
+        near = np.r_[mids[max(0, i - window):i], mids[i + 1:i + 1 + window]]
+        center = float(np.median(near))
+        if abs(mids[i] - center) > far * typical and sizes[i] < 2 * typical:
+            continue
+        keep.append(r)
+    return keep
+
+
+def _same_candle(parts):
+    """Столбцы одной свечи перекрываются по высоте. Если в каком-то столбце «самой длинной группой»
+    оказался текст подписи или значок далеко сверху / снизу — он не часть свечи: иначе свеча
+    растянулась бы на всю картинку. Оставляем столбцы, связанные по высоте со средним."""
+    if len(parts) <= 1:
+        return parts
+    middle = parts[len(parts) // 2]
+    top, bottom = middle[0], middle[1]
+    keep = [middle]
+    changed = True
+    rest = [p for i, p in enumerate(parts) if i != len(parts) // 2]
+    while changed:
+        changed = False
+        for p in list(rest):
+            if p[0] <= bottom + 2 and p[1] >= top - 2:
+                keep.append(p)
+                rest.remove(p)
+                top, bottom = min(top, p[0]), max(bottom, p[1])
+                changed = True
+    return keep
+
+
 def _candle_rows(img, mask, h, zone=CANDLE_ZONE, full=None):
     cols = _columns(mask, cv2.cvtColor(img, cv2.COLOR_BGR2HSV), h, zone)
     rows = []
     for g in _groups(cols):
-        parts = [cols[x] for x in g]
+        parts = _same_candle([cols[x] for x in g])
         top = min(p[0] for p in parts)
         bottom = max(p[1] for p in parts)
         center = int(round(np.mean(g)))
@@ -643,7 +710,7 @@ def _candle_rows(img, mask, h, zone=CANDLE_ZONE, full=None):
         rows.append({"x": float(np.mean(g)), "width": len(g), "high": float(h - 1 - top), "low": float(h - 1 - bottom),
                      "upper": float(h - 1 - body_top), "lower": float(h - 1 - body_bottom),
                      "color": int(color), "volume": float(max(p[3] for p in parts))})
-    return rows
+    return _drop_strays(rows)
 
 
 def _to_frame(rows, h):
@@ -967,9 +1034,97 @@ def _candle_like(img, line):
     return green >= 0.15 and red >= 0.15
 
 
+def erase_labels(img, background, protect=()):
+    """Цветные ярлыки с текстом, таблички индикаторов, «позиции» и непрозрачные зоны — плоские
+    полосы ОДНОГО цвета: в каждой строке длинный сплошной отрезок, и так несколько строк подряд.
+    Свечи так не выглядят (они узкие, а соседние — разного цвета и высоты). Стираем такие полосы
+    (то, что под непрозрачным ярлыком, и так не видно). Тонкие линии (уровни BOS, EQH) не трогаем."""
+    h, w = img.shape[:2]
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    diff = np.abs(img.astype(int) - background).sum(axis=2)
+    colored = (hsv[..., 1] >= SATURATION_MIN) & (diff > FOREGROUND_DIFF)
+    if colored.sum() < 50:
+        return img
+    hue = hsv[..., 0].astype(int)
+    classes = [(hue >= GREEN_HUE[0]) & (hue <= GREEN_HUE[1]), (hue <= 12) | (hue >= 160)]
+    classes.append(~(classes[0] | classes[1]))
+    length = int(max(40, 0.04 * w))
+    found = np.zeros((h, w), np.uint8)
+    # серая табличка индикатора (тёмная или светлая плашка с цветным текстом)
+    plate = (hsv[..., 1] < 40) & (diff > 150)             # плотная плашка, а не бледная заливка зоны
+    plate = cv2.morphologyEx(plate.astype(np.uint8), cv2.MORPH_OPEN, np.ones((12, length), np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(plate)
+    tables = np.zeros((h, w), np.uint8)
+    for i in range(1, count):
+        x, y, bw, bh, area = stats[i]
+        if area >= 0.8 * bw * bh and bh <= 0.35 * h and bw <= 0.5 * w:
+            tables[y:y + bh, x:x + bw] = 1
+    for cls in classes:
+        mask = (colored & cls).astype(np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((1, 5), np.uint8))       # буквы внутри ярлыка
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((1, length), np.uint8))   # только длинные отрезки
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((6, 1), np.uint8))        # и толстые полосы
+        found |= mask
+    if not found.any() and not tables.any():
+        return img
+    clean = img.copy()
+    clean[tables > 0] = background.astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(found)
+    for i in range(1, count):
+        x, y, bw, bh, _ = stats[i]
+        if bh > 0.12 * h:
+            continue                                   # высокий блок — не ярлык (вдруг это свечи)
+        if y + bh >= 0.9 * h:
+            continue                                   # у нижнего края — столбики объёма, а не ярлык
+        inside = any(min(x + bw, r + 1) - max(x, l) > 0.5 * bw and min(y + bh, b + 1) - max(y, t) > 0.5 * bh
+                     for l, t, r, b, _ in protect)
+        if inside:
+            continue                                   # это залитая зона пользователя — её не стираем
+        clean[max(0, y - 1):y + bh + 1, max(0, x - 1):x + bw + 1] = background.astype(np.uint8)
+    return clean
+
+
+def erase_legend(img, background):
+    """Подписи сверху слева (тикер, O H L C зелёными и красными цифрами, индикаторы) — строки
+    мелкого текста. Текст: много маленьких значков на одной линии вплотную друг к другу.
+    Свечи так не стоят (они разной высоты и с ровным шагом). Закрашиваем такие строки фоном."""
+    h, w = img.shape[:2]
+    zone = int(0.2 * h)
+    if zone < 20:
+        return img
+    diff = np.abs(img[:zone].astype(int) - background).sum(axis=2)
+    fg = (diff > FOREGROUND_DIFF).astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(fg)
+    small = [i for i in range(1, count) if stats[i][3] <= max(14, 0.03 * h) and stats[i][2] <= 0.05 * w]
+    rows = {}
+    for i in small:
+        x, y, bw, bh, _ = stats[i]
+        rows.setdefault(int((y + bh / 2) // 6), []).append(i)
+    clean = img.copy()
+    for band, items in rows.items():
+        items = sorted(items, key=lambda i: stats[i][0])
+        run = [items[0]]
+        for i in items[1:] + [None]:
+            if i is not None and stats[i][0] - (stats[run[-1]][0] + stats[run[-1]][2]) <= 12:
+                run.append(i)
+                continue
+            heights = [stats[k][3] for k in run]
+            if len(run) >= 6 and max(heights) - min(heights) <= 10:       # строка текста
+                x0 = min(stats[k][0] for k in run)
+                x1 = max(stats[k][0] + stats[k][2] for k in run)
+                y0 = min(stats[k][1] for k in run)
+                y1 = max(stats[k][1] + stats[k][3] for k in run)
+                for k in run:
+                    clean[:zone][labels == k] = background.astype(np.uint8)
+            run = [i] if i is not None else []
+    return clean
+
+
 def _prepare(path, with_boxes=False):
     img = load_image(path)
     background = detect_background(img)
+    img = erase_legend(img, background)                   # подписи TradingView сверху слева
+    img = erase_labels(img, background, filled_boxes(img, background))
     panel = main_panel(img, foreground_mask(img, background))
     if panel is not None:                        # несколько графиков в рамках — берём главный
         top, bottom, left, right = panel

@@ -126,8 +126,12 @@ def chat(messages, schema=None, max_tokens=500, temperature=0.1):
                                                   temperature=temperature, **kwargs)
             return out["choices"][0]["message"]["content"]
         import requests
+        # keep_alive -1: модель остаётся в памяти — не грузится заново (это 10–30 с) на каждый вопрос;
+        # num_thread — все ядра сервера
         body = {"model": load_config().get("model", OLLAMA_MODEL), "messages": messages, "stream": False,
-                "options": {"temperature": temperature, "num_predict": max_tokens, "num_ctx": CONTEXT}}
+                "keep_alive": -1,
+                "options": {"temperature": temperature, "num_predict": max_tokens, "num_ctx": CONTEXT,
+                            "num_thread": max(2, os.cpu_count() or 4)}}
         if schema:
             body["format"] = schema
         response = requests.post(OLLAMA_URL, json=body, timeout=TIMEOUT)
@@ -142,6 +146,21 @@ def ask_json(messages, schema, max_tokens=500):
     if start < 0 or end < start:
         raise ValueError(f"не JSON: {text[:80]}")
     return json.loads(text[start:end + 1])
+
+
+def warm_up():
+    """При запуске бота — загрузить модель в память в фоне, чтобы первый пользователь не ждал загрузки."""
+    if not available():
+        return None
+
+    def run():
+        try:
+            chat([{"role": "user", "content": "ok"}], max_tokens=1)
+        except Exception as error:
+            print("Мозг не прогрелся:", error)
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
 
 
 # --- описание паттерна → условия -----------------------------------------------------------------------
@@ -250,7 +269,7 @@ def understand(text, name):
         return json.loads(json.dumps(_cache[key]))
     try:
         started = time.time()
-        answer = ask_json(spec_messages(text, name, lines), spec_schema(keys))
+        answer = ask_json(spec_messages(text, name, lines), spec_schema(keys), max_tokens=300)
         spec = clean_spec(answer, keys)
         spec["brain_seconds"] = round(time.time() - started, 1)
     except Exception as error:

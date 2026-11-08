@@ -87,3 +87,20 @@ def test_red_lines_over_candles_are_drawings(tmp_path):
     assert len(lines) >= 2 and all(getattr(ln, "candle_colored", False) for ln in lines)
     candles = vision.extract_candles(path)
     assert candles is not None and abs(len(candles) - len(df)) <= 3
+
+
+def _sane(candles):
+    """Свечи похожи на график: нет «свечей» на всю высоту из подписей и ярлыков."""
+    span = candles["high"].max() - candles["low"].min()
+    tall = ((candles["high"] - candles["low"]) > 0.4 * span).mean()
+    return tall <= 0.02
+
+
+def test_real_tradingview_full_window_light():
+    """Настоящий скрин окна TradingView: подписи сверху, шкала цены, ярлыки, табличка.
+    Раньше подписи и ярлыки читались как сотни свечей на всю высоту."""
+    for name, low, high in (("real_tv_light_full.png", 220, 380), ("real_tv_light_table.png", 280, 470),
+                            ("real_tv_dark_labels.png", 420, 680)):
+        candles = vision.extract_candles(os.path.join(HERE, name))
+        assert candles is not None and low <= len(candles) <= high, (name, None if candles is None else len(candles))
+        assert _sane(candles), name

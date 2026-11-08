@@ -1058,6 +1058,83 @@ def understood_text(spec):
     return "\n".join(lines) + "\n"
 
 
+def doubts_text(spec):
+    """В чём бот не уверен — честно показываем и просим проверить."""
+    lines = []
+    if "direction" in (spec.get("doubts") or []):
+        lines.append("⚠️ Направление взял по твоим словам — нейросеть поняла иначе. Проверь.")
+    guessed = [language.CONCEPTS[k][0] for k in spec.get("guessed") or [] if k in language.CONCEPTS]
+    if guessed:
+        lines.append("🤔 Это я понял между строк — проверь: " + "; ".join(guessed[:4]))
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def spec_keyboard(pattern_id, spec):
+    """Под «понял так»: ✅ верно, 🔄 направление наоборот, ✖ убрать лишнее условие, ✏️ переписать.
+    Так пользователь за секунду поправит бота, если тот понял не так."""
+    rows = [[{"text": "✅ Всё верно", "callback_data": f"spok:{pattern_id}"}]]
+    if spec.get("direction"):
+        rows[0].append({"text": "🔄 Направление наоборот", "callback_data": f"spflip:{pattern_id}"})
+    remove = [(k, language.CONCEPTS[k][0]) for k in spec.get("require", []) + spec.get("prefer", [])
+              + spec.get("forbid", []) if k in language.CONCEPTS][:6]
+    if spec.get("timeframes"):
+        remove.append(("tf", "таймфреймы " + " ".join(t.upper() for t in spec["timeframes"])))
+    buttons = [{"text": "✖ " + (label if len(label) <= 24 else label[:23] + "…"),
+                "callback_data": f"sprm:{pattern_id}:{key}"} for key, label in remove]
+    rows += [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([{"text": "✏️ Переписать", "callback_data": f"describe:{pattern_id}"},
+                 {"text": "📂 Мои паттерны", "callback_data": "my"}])
+    return {"inline_keyboard": rows}
+
+
+def spec_message(name, spec, head):
+    return (f"{head}\n\n{understood_text(spec)}{doubts_text(spec)}\n"
+            "Всё верно? Если нет — убери лишнее кнопкой ✖ или поменяй направление.")
+
+
+def same_description(chat_id, pattern_id):
+    """Пример и все примеры того же паттерна с тем же описанием (описание общее для паттерна)."""
+    example = get_pattern(chat_id, pattern_id)
+    if example is None or not example.get("spec"):
+        return None, []
+    text = example["spec"].get("text")
+    return example, [p for p in get_patterns(chat_id)
+                     if p["name"] == example["name"] and (p.get("spec") or {}).get("text") == text]
+
+
+def edit_spec(chat_id, message_id, pattern_id, action, key=None):
+    """Кнопки под «понял так»: поправить описание у всех примеров с этим описанием."""
+    example, group = same_description(chat_id, pattern_id)
+    if example is None:
+        send_message("Этот пример уже удалён.", chat_id, {"inline_keyboard": [[TO_MENU]]})
+        return
+    spec = dict(example["spec"])
+    if action == "ok":
+        edit_keyboard(chat_id, message_id, {"inline_keyboard": [
+            [{"text": "✅ Запомнил", "callback_data": "noop"}],
+            [{"text": "🔍 Сканировать", "callback_data": "scan"}, TO_MENU]]})
+        return
+    if action == "flip" and spec.get("direction"):
+        spec["direction"] = "down" if spec["direction"] == "up" else "up"
+        spec["doubts"] = [d for d in spec.get("doubts") or [] if d != "direction"]
+    elif action == "rm" and key == "tf":
+        spec["timeframes"] = []
+    elif action == "rm" and key:
+        for mode in ("require", "prefer", "forbid"):
+            spec[mode] = [k for k in spec.get(mode, []) if k != key]
+        spec["understood"] = [u for u in spec.get("understood", []) if (u[0] if isinstance(u, (list, tuple)) else u) != key]
+        spec["guessed"] = [k for k in spec.get("guessed") or [] if k != key]
+    for p in group:
+        set_spec(chat_id, p["id"], spec)
+    if language.is_empty(spec):
+        edit_message(chat_id, message_id, f"Описание для «{example['name']}» убрал — ищу по скринам и оценкам.",
+                     {"inline_keyboard": [[{"text": "✏️ Описать заново", "callback_data": f"describe:{pattern_id}"},
+                                           TO_MENU]]})
+        return
+    edit_message(chat_id, message_id, spec_message(example["name"], spec, f"✏️ Поправил «{example['name']}»."),
+                 spec_keyboard(pattern_id, spec))
+
+
 def attach_spec(chat_id, pattern_id):
     """Описание из подписи к скрину — к сохранённому примеру. Возвращает текст «как понял»."""
     spec = pending_spec.get(chat_id)
@@ -1087,9 +1164,8 @@ def receive_description(chat_id, pattern_id, text):
                      + DESCRIBE_TEXT, chat_id, keyboard)
         return
     set_spec(chat_id, pattern_id, spec)
-    send_message(f"✅ Запомнил для «{example['name']}».\n\n{understood_text(spec)}\n"
-                 "Теперь ищу на рынке только такие — и из найденного беру те, где выполнено больше "
-                 "желательного. Ставь 👍/👎 под находками — дальше подстроюсь точнее.", chat_id, keyboard)
+    send_message(spec_message(example["name"], spec, f"✅ Запомнил для «{example['name']}»."),
+                 chat_id, spec_keyboard(pattern_id, spec))
 
 
 def free_text(chat_id, text):
@@ -1097,7 +1173,10 @@ def free_text(chat_id, text):
     описывает паттерн, спрашивает о трейдинге, просит скан или монету. Без неё — словарь:
     назван паттерн и есть условия → это описание; иначе меню."""
     wish = None
-    if brain.available() and billing.is_pro(chat_id) and brain_allowed(chat_id):
+    named = language.detect_pattern(text)
+    if named and not language.is_empty(language.parse(text, named)):
+        wish = {"intent": "describe", "pattern": named}       # «FVG на 4ч, свежий» — понятно и без нейросети
+    elif brain.available() and billing.is_pro(chat_id) and brain_allowed(chat_id):
         brain_notice(chat_id, None)
         wish = brain.intent(text, ALL_PATTERNS)
     if wish is None:
@@ -1172,9 +1251,8 @@ def describe_pattern(chat_id, name, text):
     for example in examples:
         set_spec(chat_id, example["id"], spec)
     count = plural(len(examples), "пример", "примера", "примеров")
-    send_message(f"✅ Запомнил для «{name}» ({count}).\n\n{understood_text(spec)}\n"
-                 "Теперь ищу на рынке только такие. Ставь 👍/👎 под находками — подстроюсь точнее.",
-                 chat_id, {"inline_keyboard": [[{"text": "🔍 Сканировать", "callback_data": "scan"}, TO_MENU]]})
+    send_message(spec_message(name, spec, f"✅ Запомнил для «{name}» ({count})."),
+                 chat_id, spec_keyboard(examples[0]["id"], spec))
 
 
 def receive_example(chat_id, name, path):
@@ -2302,6 +2380,11 @@ def handle_callback(query):
         start_describing(chat_id, value)
         return
 
+    if action in ("spok", "spflip", "sprm"):    # поправить, как бот понял описание
+        pattern_id, _, key = value.partition(":")
+        edit_spec(chat_id, message_id, pattern_id, {"spok": "ok", "spflip": "flip", "sprm": "rm"}[action], key or None)
+        return
+
     # --- подтверждение нового скриншота
     if action == "ok":
         pattern = next((p for p in get_patterns(chat_id) if p["id"] == value), None)
@@ -2404,6 +2487,7 @@ def main():
     on = quality.load()                                            # ИИ-значимость, если setup_ai.py её обучил
     print("ИИ-значимость:", ", ".join(quality.FAMILY_TEXT[f] for f in on) or "нет (работают правила)")
     print("Мозг (понимание слов):", brain.status())
+    brain.warm_up()
     print("Оплата: ⭐ Stars" + (" + 💳 ЮKassa" if billing.yookassa_on() else " (ЮKassa не настроена)")
           + f" · админ: {', '.join(map(str, billing.admins())) or 'не задан (ADMIN_IDS в .env)'}")
     try:

@@ -35,7 +35,7 @@ CONCEPTS = {
     "liquidity": ("снятие ликвидности (прошлый свинг)",
                   [r"ликвид", r"\bликв", r"сбор\w*\s+(ликв|стоп)", r"ложн\w*\s+пробо", r"\bsweep", r"свип", r"сн(ял|яла|яли|имает|ятие|ять)\s+(стоп|хай|лой|ликв|свинг|макс|мин)",
                    r"забрал\w*\s+(стоп|хай|лой|ликв)", r"собрал\w*\s+(стоп|ликв)", r"прострел", r"выбил\w*\s+стоп",
-                   r"\bstop\s*hunt", r"\bliquidity", r"\bssl\b", r"\bbsl\b", r"\bгрэб", r"\bgrab", r"выколол",
+                   r"\bstop\s*hunt", r"\bliquidity", r"\bssl\b", r"\bbsl\b", r"\bгрэб", r"\bgrab", r"выколол", r"\bвынос\w*", r"ложн\w*\s+(вынос|прокол)",
                    r"проколол\w*\s+(хай|лой|минимум|максимум|свинг|уровен)"],
                   ["снял стопы", "собрал ликвидность", "забрал хаи", "забрал лои", "прокол прошлого минимума",
                    "вынес стопы", "ложный пробой уровня", "сходил за минимум", "сходил за максимум",
@@ -52,7 +52,7 @@ CONCEPTS = {
                 "сразу противоположная свеча", "свеча перекрыла блок", "закрытие за минимумом блока"],
                ("zone",)),
     "impulse": ("резкий импульс от зоны",
-                [r"импульс", r"\bdisplacement", r"резк\w*\s+(движ|уход|выход|свеч|рост|паден|вынос|отскок)",
+                [r"отрыв", r"ушл\w*\s+(резко|быстро)", r"импульс", r"\bdisplacement", r"резк\w*\s+(движ|уход|выход|свеч|рост|паден|вынос|отскок)",
                  r"сильн\w*\s+(движ|свеч|импульс|вынос|отскок)", r"вынос", r"больш\w*\s+свеч", r"улет", r"выстрел",
                  r"пампан|дампан|\bpump|\bdump"],
                 ["цена резко ушла от зоны", "мощное движение", "быстро ушли", "сильный отскок", "резкий рост",
@@ -102,11 +102,11 @@ CONCEPTS = {
     "fresh": ("свежая — цена ещё не возвращалась",
               [r"нетронут", r"не\s*тронут", r"свеж", r"не\s*тестир", r"не\s*протестир", r"перв\w*\s+(ретест|касани|тест)",
                r"не\s*митиг", r"\bfresh", r"\bunmitigated", r"не\s*отработ", r"не\s*задет", r"цел[ао]я?\b",
-               r"без\s+(касан|ретест|тест|возврат)", r"не\s*перекрыт", r"не\s*закрыт", r"не\s*отработ", r"цена\s+не\s+(возвращ|приход|заход)", r"не\s*заполн", r"чист\w*\s+зон"],
+               r"без\s+(касан|ретест|тест|возврат)", r"не\s*перекры", r"не\s*закры(т|л|в)", r"не\s*(возвращ|возвраща|заходил|приходил)", r"не\s*отработ", r"цена\s+не\s+(возвращ|приход|заход)", r"не\s*заполн", r"чист\w*\s+зон"],
               ["цена ещё не возвращалась в зону", "зона не отработана", "первое касание зоны", "не было ретеста"],
               ("zone",)),
     "retest": ("уже был ретест / цена вернулась",
-               [r"ретест", r"\bretest", r"верн(улась|улись|ется)", r"протестир\w*\s+(зон|уров|блок)", r"тестир\w*\s+(зон|уров)"],
+               [r"ретест", r"\bretest", r"верн(улась|улись|ется)", r"протестир\w*\s+(зон|уров|блок)", r"тестир\w*\s+(зон|уров)", r"протестирован", r"(был|уже)\s+(\w+\s+)?(протестир|тестир|касал)\w*", r"уже\s+(возвращ|приход)\w*"],
                ["цена вернулась к уровню", "был ретест уровня", "проверили уровень сверху"],
                ("zone", "structure", "range", "figure", "flag", "shape")),
     "near_price": ("рядом с текущей ценой",
@@ -154,7 +154,7 @@ CONCEPTS = {
     "confirmed": ("пробой подтверждён (шея / граница пробита)",
                   [r"шея\s+пробит", r"пробо\w*\s+ше", r"подтвержд", r"пробил\w*\s+шею", r"закрыл\w*\s+за\s+ше",
                    r"пробит\w*\s+(границ|лини|уров)", r"вышл\w*\s+из\s+(фигур|канал|треуг|боков|флаг)", r"\bbreakout",
-                   r"пробой"],
+                   r"пробой", r"пробо(ем|я|ю|е)\b", r"пробит\w*\s+ше"],
                   ["цена вышла из фигуры", "пробой границы", "закрепились за линией"],
                   ("shape", "figure", "flag", "range")),
     "symmetry": ("симметричная фигура",
@@ -177,6 +177,13 @@ CONCEPTS = {
                   ["дыра совпадает с ордерблоком", "имбаланс в зоне блока"],
                   ("zone",)),
 }
+
+SWEEP_LOW = (r"(под|ниже)\s+(ло[еёияюй]\w*|лоу\w*|минимум\w*|днами|днище\w*|equal\s+lows?)|\bssl\b"
+             r"|(сня|собра|выби|сбор|снос)\w*\s+(\w+\s+)?(ло[еёияй]\w*|минимум\w*|ssl)")
+SWEEP_HIGH = (r"(над|выше)\s+(ха[еёияюй]\w*|хай\w*|максимум\w*|вершин\w*|equal\s+highs?)|\bbsl\b"
+              r"|(сня|собра|выби|сбор|снос)\w*\s+(\w+\s+)?(ха[еёияй]\w*|хай\w*|максимум\w*|bsl)")
+# условие, которое для этого паттерна бессмысленно (FVG сам и есть имбаланс)
+SELF_CONCEPTS = {"FVG": {"imbalance"}}
 
 SLOPED_UP = {"ascending", "rising_wedge", "channel_up"}
 SLOPED_DOWN = {"descending", "falling_wedge", "channel_down"}
@@ -262,11 +269,17 @@ def _negated(clause, position):
     (между ними — лишь служебные слова: «не должно быть FVG», «без FVG»).
     «не заполнена рядом с ценой» — «не» относится к «заполнена», а не к «рядом с ценой»."""
     before = _tokens(clause[:position])
+    verbs = 0
     for w in reversed(before[-4:]):
         if w in NEGATION_WORDS or w.startswith(("исключ", "никак")):
             return True
-        if w not in STOP and w not in FILLER:
-            return False
+        if w in STOP or w in FILLER:
+            continue
+        # «не закрылся телом», «не пробил телом» — между «не» и понятием глагол: отрицание к понятию
+        if verbs == 0 and re.search(r"(л|лся|лась|лось|лись|ла|ли|ет|ется|ут|ют)$", w) and len(w) >= 4:
+            verbs += 1
+            continue
+        return False
     return False
 
 
@@ -317,6 +330,13 @@ def parse(text, name=""):
         spec["direction"] = "up"
     elif down and not up:
         spec["direction"] = "down"
+    elif not up and not down and GROUPS.get(name) in ("zone", "structure"):
+        # «выбило стопы под лоями» — сняли ликвидность снизу, ждём рост; «над хаями» — падение
+        low, high = re.search(SWEEP_LOW, text), re.search(SWEEP_HIGH, text)
+        if low and not high:
+            spec["direction"], spec["direction_hint"] = "up", True
+        elif high and not low:
+            spec["direction"], spec["direction_hint"] = "down", True
     if name in ("Треугольник", "Клин", "Канал"):
         spec["slope"] = True                      # «восходящий / падающий» — про наклон фигуры
     touches = re.search(r"(\d+|двух|двуx|тр[её]х|четыр[её]х|пяти|шести)\s*\+?\s*(касан|тест|точ|раз)", text)
@@ -341,7 +361,17 @@ def parse(text, name=""):
         _add(spec, _concepts_in(text, group, whole=True, name=name))
         if spec["require"] or spec["prefer"] or spec["forbid"]:
             spec["unknown"] = []
+    _drop_self(spec, name)
     return spec
+
+
+def _drop_self(spec, name):
+    """Убирает условия, бессмысленные для самого паттерна (у FVG — «имбаланс внутри»)."""
+    for key in SELF_CONCEPTS.get(name, ()):
+        for mode in ("require", "prefer", "forbid"):
+            if key in spec.get(mode, []):
+                spec[mode].remove(key)
+        spec["understood"] = [(k, m) for k, m in spec.get("understood", []) if k != key]
 
 
 def _concepts_in(clause, group, whole=False, name=""):
@@ -738,18 +768,40 @@ def understand(text, name="", smart=True):
     smart = brain.understand(text, name)
     if smart is None:
         return rules
-    spec = {**smart, "text": rules["text"], "brain": True}
+    return reconcile(smart, rules, name)
+
+
+def reconcile(smart, rules, name=""):
+    """Ответ нейросети сверяем со словарём — маленькая модель иногда путает:
+    • направление: если словарь нашёл его в словах («бычий», «под лоями») — верим словарю;
+    • «нельзя» из словаря сильнее «обязательно» нейросети;
+    • бессмысленное для паттерна условие (у FVG «имбаланс внутри») убираем;
+    • условия, которые нашла ТОЛЬКО нейросеть, — «догадки»: бот попросит их проверить.
+    В spec["doubts"] — в чём бот не уверен (покажем пользователю и спросим)."""
+    spec = {**smart, "text": rules["text"], "brain": True, "doubts": []}
+    rule_modes = dict(rules["understood"])
+    for key, mode in rule_modes.items():                          # словарь сильнее, если режимы спорят
+        for other in ("require", "prefer", "forbid"):
+            if other != mode and key in spec[other]:
+                spec[other].remove(key)
+    spec["understood"] = [(k, m) for k, m in spec.get("understood", []) if rule_modes.get(k, m) == m]
     taken = set(spec["require"] + spec["prefer"] + spec["forbid"])
     for key, mode in rules["understood"]:
         if key not in taken:                                   # нейросеть пропустила — словарь подскажет
             spec[mode].append(key)
             spec["understood"].append((key, mode))
             taken.add(key)
-    spec["timeframes"] = spec["timeframes"] or rules["timeframes"]
-    spec["direction"] = spec["direction"] or rules["direction"]
-    spec["min_touches"] = spec["min_touches"] or rules["min_touches"]
+    spec["guessed"] = [k for k in taken if k not in rule_modes]
+    spec["timeframes"] = rules["timeframes"] or spec["timeframes"]       # ТФ названы словами — точнее словарь
+    if rules["direction"]:
+        if spec.get("direction") and spec["direction"] != rules["direction"]:
+            spec["doubts"].append("direction")
+        spec["direction"] = rules["direction"]
+    spec["min_touches"] = rules["min_touches"] or spec["min_touches"]
     spec["touches_each"] = bool(spec.get("touches_each") or rules.get("touches_each"))
     spec["slope"] = bool(rules.get("slope"))
+    _drop_self(spec, name)
+    spec["guessed"] = [k for k in spec["guessed"] if k in spec["require"] + spec["prefer"] + spec["forbid"]]
     if taken or spec["timeframes"] or spec["direction"]:
         spec["unknown"] = [u for u in spec["unknown"] if u]
     return spec
