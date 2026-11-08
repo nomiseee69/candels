@@ -178,6 +178,10 @@ CONCEPTS = {
                   ("zone",)),
 }
 
+SLOPED_UP = {"ascending", "rising_wedge", "channel_up"}
+SLOPED_DOWN = {"descending", "falling_wedge", "channel_down"}
+SLOPED_NONE = {"symmetric", "channel_flat"}
+
 PREFER = r"(желательн|лучше|предпочт|приоритет|по\s*возможност|хорошо\s+бы|плюсом|бонус|в\s+идеале|идеально|приветств)"
 REQUIRE = r"(обязательн|только|должн|нуж(ен|на|но|ны)|строго|всегда|точно|непременно|важно|главное|необходим)"
 NEGATION_WORDS = ("не", "без", "нет", "ни", "кроме", "исключ", "никак", "not", "no", "without", "против")
@@ -189,9 +193,9 @@ TIMEFRAMES = {"1h": [r"\b1\s*[hч]\b", r"\b1\s*час", r"\bчасов(ик|ой
 OLDER = r"(старш|высок|больш|крупн)\w*\s+(тф|таймфрейм|tf|интервал)|\bhtf\b"
 YOUNGER = r"(младш|мелк|низк|маленьк)\w*\s+(тф|таймфрейм|tf|интервал)|\bltf\b"
 BULLISH = [r"бычь?", r"\bлонг", r"\blong\b", r"покуп", r"вверх", r"\bbull", r"\bbuy", r"\bрост\b", r"поддержк",
-           r"\bспрос", r"\bdemand", r"восходящ"]
+           r"\bспрос", r"\bdemand", r"восходящ", r"растущ", r"поднимающ"]
 BEARISH = [r"медвеж", r"\bшорт", r"\bshort\b", r"продаж", r"вниз", r"\bbear", r"\bsell", r"паден", r"сопротивлен",
-           r"предложен", r"\bsupply", r"нисходящ"]
+           r"предложен", r"\bsupply", r"нисходящ", r"падающ", r"снижающ"]
 STOP = {"и", "в", "на", "с", "у", "к", "по", "от", "до", "за", "что", "чтобы", "это", "как", "так", "же", "бы",
         "который", "которая", "которое", "которую", "которые", "если", "то", "а", "но", "или", "мне", "надо",
         "нужно", "должен", "должна", "должно", "был", "была", "было", "быть", "есть", "его", "её", "их", "там",
@@ -296,6 +300,14 @@ def parse(text, name=""):
     for tf, patterns in TIMEFRAMES.items():
         if _found(patterns, text):
             spec["timeframes"].append(tf)
+    order = list(TIMEFRAMES)
+    if len(spec["timeframes"]) == 1:                  # «4ч и выше», «от 4ч», «до дневки», «1д и ниже»
+        i = order.index(spec["timeframes"][0])
+        tf = r"(\d+\s*[hчdдwн]\b|[hdw]\d+\b|д1\b|дневк\w*|дневн\w*|недел\w*|\d+\s*час\w*)"
+        if re.search(r"(и|или)\s+(выше|старше|больше)|\bот\s+" + tf + r"|\bи\s+более", text):
+            spec["timeframes"] = order[i:]
+        elif re.search(r"(и|или)\s+(ниже|младше|меньше)|\bдо\s+" + tf, text):
+            spec["timeframes"] = order[:i + 1]
     if not spec["timeframes"] and re.search(OLDER, text):
         spec["timeframes"] = ["12h", "1d", "1w"]
     elif not spec["timeframes"] and re.search(YOUNGER, text):
@@ -305,6 +317,8 @@ def parse(text, name=""):
         spec["direction"] = "up"
     elif down and not up:
         spec["direction"] = "down"
+    if name in ("Треугольник", "Клин", "Канал"):
+        spec["slope"] = True                      # «восходящий / падающий» — про наклон фигуры
     touches = re.search(r"(\d+|двух|двуx|тр[её]х|четыр[её]х|пяти|шести)\s*\+?\s*(касан|тест|точ|раз)", text)
     if touches:
         word = touches.group(1)
@@ -316,7 +330,8 @@ def parse(text, name=""):
     for clause in clauses:
         hits = _concepts_in(clause, group, name=name)
         known = hits or _found([p for ps in TIMEFRAMES.values() for p in ps] + BULLISH + BEARISH
-                               + [OLDER, YOUNGER, r"\bтен", r"фитил"], clause) \
+                               + [OLDER, YOUNGER, r"\bтен", r"фитил", r"^(и\s+)?(выше|старше|ниже|младше|сверху|снизу)$",
+                                  r"(сверху|снизу)\s+и\s+(сверху|снизу)"], clause) \
             or re.search(r"касан", clause) or _is_pattern_name(clause, name)
         _add(spec, hits)
         if not known and len(clause) > 3:
@@ -425,7 +440,9 @@ def describe(spec):
             lines.append(f"{title}: " + "; ".join(CONCEPTS[k][0] for k in keys))
     if spec.get("timeframes"):
         lines.append("таймфреймы: " + ", ".join(tf.upper() for tf in spec["timeframes"]))
-    if spec.get("direction"):
+    if spec.get("direction") and spec.get("slope"):
+        lines.append("фигура: " + ("восходящая (наклон вверх)" if spec["direction"] == "up" else "нисходящая (наклон вниз)"))
+    elif spec.get("direction"):
         lines.append("направление: " + ("бычий (вверх)" if spec["direction"] == "up" else "медвежий (вниз)"))
     if spec.get("min_touches"):
         lines.append(f"касаний: не меньше {spec['min_touches']}"
@@ -451,6 +468,7 @@ def merge(*specs):
                     out[mode].append(key)
         out["timeframes"] = out["timeframes"] or list(spec.get("timeframes") or [])
         out["direction"] = out["direction"] or spec.get("direction")
+        out["slope"] = out.get("slope") or spec.get("slope")
         out["min_touches"] = out["min_touches"] or spec.get("min_touches")
         out["touches_each"] = out.get("touches_each") or spec.get("touches_each")
     return out
@@ -658,10 +676,15 @@ def check(spec, df, item, interval=None):
         return False, 0
     f = facts(df, item)
     if spec.get("direction"):
-        directed = str(item.get("kind", "")).startswith(("bullish", "bearish")) or item.get("direction") \
-            or item.get("kind") in ("eqh", "eql") or item.get("points")
-        if directed and f["_bullish"] != (spec["direction"] == "up"):
-            return False, 0
+        kind = str(item.get("kind", ""))
+        if kind in SLOPED_UP | SLOPED_DOWN | SLOPED_NONE:          # треугольник / клин / канал: наклон фигуры
+            if kind not in (SLOPED_UP if spec["direction"] == "up" else SLOPED_DOWN):
+                return False, 0
+        else:
+            directed = kind.startswith(("bullish", "bearish")) or item.get("direction") \
+                or kind in ("eqh", "eql") or item.get("points")
+            if directed and f["_bullish"] != (spec["direction"] == "up"):
+                return False, 0
     for key in spec.get("require", []):
         if f.get(key) is False:
             return False, 0
@@ -726,6 +749,7 @@ def understand(text, name="", smart=True):
     spec["direction"] = spec["direction"] or rules["direction"]
     spec["min_touches"] = spec["min_touches"] or rules["min_touches"]
     spec["touches_each"] = bool(spec.get("touches_each") or rules.get("touches_each"))
+    spec["slope"] = bool(rules.get("slope"))
     if taken or spec["timeframes"] or spec["direction"]:
         spec["unknown"] = [u for u in spec["unknown"] if u]
     return spec

@@ -70,7 +70,17 @@ def backend():
     if os.environ.get("PF_BRAIN", "").lower() in ("off", "0", "no"):
         return None
     name = load_config().get("backend")
+    if name == "llama" and not _llama_ready():
+        return None                      # brain.json есть, а пакета или модели нет (например, скопировали на сервер)
     return name if name in ("llama", "ollama") else None
+
+
+def _llama_ready():
+    """Пакет llama-cpp-python стоит и файл модели на месте."""
+    import importlib.util
+    if importlib.util.find_spec("llama_cpp") is None:
+        return False
+    return os.path.exists(load_config().get("model", MODEL_FILE).replace("\\", "/"))
 
 
 def busy():
@@ -97,7 +107,7 @@ def _llama():
     global _llm
     if _llm is None:
         from llama_cpp import Llama
-        path = load_config().get("model", MODEL_FILE)
+        path = load_config().get("model", MODEL_FILE).replace("\\", "/")
         _llm = Llama(model_path=path, n_ctx=CONTEXT, n_threads=max(2, (os.cpu_count() or 4) - 1),
                      verbose=False)
     return _llm

@@ -12,8 +12,9 @@ class FakeBrain:
 
     def __init__(self, answers):
         self.answers, self.asked = list(answers), []
-        self.saved = brain.load_config, brain.chat, brain._cache.copy()
+        self.saved = brain.load_config, brain.chat, brain._cache.copy(), brain._llama_ready
         brain.load_config = lambda: {"backend": "llama"}
+        brain._llama_ready = lambda: True
         brain.chat = self.chat
         brain._cache.clear()
 
@@ -23,7 +24,7 @@ class FakeBrain:
         return answer if isinstance(answer, str) else json.dumps(answer, ensure_ascii=False)
 
     def restore(self):
-        brain.load_config, brain.chat = self.saved[0], self.saved[1]
+        brain.load_config, brain.chat, brain._llama_ready = self.saved[0], self.saved[1], self.saved[3]
         brain._cache.clear()
         brain._cache.update(self.saved[2])
 
@@ -140,3 +141,15 @@ def test_free_text_without_model_uses_dictionary(tmp_path):
         brain.load_config = saved
         rec.restore()
         storage.FILE = original
+
+
+def test_brain_json_without_package_or_model_means_dictionary(tmp_path):
+    """brain.json скопировали на сервер, а модель там не поставили — бот честно работает по словарю,
+    а не пытается каждый раз запустить несуществующую нейросеть."""
+    saved = brain.load_config
+    try:
+        brain.load_config = lambda: {"backend": "llama", "model": str(tmp_path / "нет.gguf")}
+        assert brain.backend() is None and not brain.available()
+        assert "словар" in brain.status()
+    finally:
+        brain.load_config = saved

@@ -54,7 +54,7 @@ def test_one_pine_for_all_timeframes():
     df_1h, df_4h = frame_df(freq="h"), frame_df(freq="4h")
     groups = [(df_1h, [FVG], False, "1h"), (df_4h, [OB], True, "4h"), (df_4h, [], False, "4h")]
     code = pine_script("SOLUSDT", "1h", groups)
-    assert 'indicator("Pattern Finder v46 · SOLUSDT 1H 4H"' in code
+    assert 'indicator("Pattern Finder v47 · SOLUSDT 1H 4H"' in code
     assert 'show_1h = input.bool(true, "1H", group="Таймфреймы")' in code and 'show_4h = input.bool(true, "4H"' in code
     assert "chart_seconds = timeframe.in_seconds()" in code
     assert "if barstate.islast and show_4h and (not only_higher or chart_seconds <= 14400)" in code

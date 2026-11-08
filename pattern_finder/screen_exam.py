@@ -132,10 +132,10 @@ def _segment(item, lo):
     return (None, None)
 
 
-def render(df, path, theme="dark", drawing=(None, None), volume=True, width=9, height=5):
+def render(df, path, theme="dark", drawing=(None, None), volume=True, width=9, height=5, dpi=100):
     bg, grid, text = THEMES[theme]
     n = len(df)
-    fig = plt.figure(figsize=(width, height), dpi=100)
+    fig = plt.figure(figsize=(width, height), dpi=dpi)
     fig.patch.set_facecolor(bg)
     ax = fig.add_axes([0.01, 0.06, 0.91, 0.92])
     ax.set_facecolor(bg)
@@ -175,7 +175,7 @@ def render(df, path, theme="dark", drawing=(None, None), volume=True, width=9, h
     ax.set_xticks([])
     for s in ax.spines.values():
         s.set_visible(False)
-    fig.savefig(path, facecolor=bg)
+    fig.savefig(path, facecolor=bg, dpi=dpi)
     plt.close(fig)
     return path
 

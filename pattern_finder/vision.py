@@ -82,7 +82,21 @@ def load_image(path):
     img = cv2.imdecode(data, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError(f"Не удалось открыть картинку: {path}")
-    return img
+    return normalize_size(img)
+
+
+WORK_SIDE = 1280             # большие скрины (4K, ретина, «HD» в Telegram) уменьшаем до этого размера:
+MAX_SIDE = 1400              # все пороги чтения (толщина рамки, ширина свечи…) подобраны для обычного размера
+
+
+def normalize_size(img):
+    """Огромный скрин → обычный размер. Иначе рамка прямоугольника и сглаживание в 2–3 раза
+    толще, чем ждут правила, и остатки рамки читаются как сотни «свечей»."""
+    h, w = img.shape[:2]
+    if max(h, w) <= MAX_SIDE:
+        return img
+    k = WORK_SIDE / max(h, w)
+    return cv2.resize(img, (max(1, round(w * k)), max(1, round(h * k))), interpolation=cv2.INTER_AREA)
 
 
 # --- фон и передний план -------------------------------------------------------
@@ -208,9 +222,15 @@ def erase_lines_by_color(img, mask, lines, thickness=11, tolerance=90):
     который линия задевает) остаётся целой — иначе её high/low «съедался» бы на несколько пикселей."""
     clean = mask.copy()
     h, w = mask.shape
+    strokes = None
     for ln in lines:
         band = np.zeros_like(mask)
         cv2.line(band, (ln.x1, ln.y1), (ln.x2, ln.y2), 255, thickness)
+        if getattr(ln, "candle_colored", False):
+            if strokes is None:
+                strokes = cv2.dilate(candle_color_strokes(img), np.ones((3, 3), np.uint8))
+            clean[(band > 0) & (strokes > 0)] = 0
+            continue
         n = max(2, int(ln.length))
         xs = np.clip(np.linspace(ln.x1, ln.x2, n).round().astype(int), 0, w - 1)
         ys = np.clip(np.linspace(ln.y1, ln.y2, n).round().astype(int), 0, h - 1)
@@ -651,23 +671,56 @@ FILL_COLOR = 45              # пиксели цвета заливки (± 45) 
 def filled_boxes(img, background):
     """Залитые прямоугольники, которые ты нарисовал на скрине (зона OB, FVG, боковик) —
     и зона, которую рисует сам бот на «примере с рынка». Возвращает [(лево, верх, право, низ, цвет)].
-    Свечи тонкие и стоят через промежутки — большой «сплошной квадрат» они не дают."""
+    Свечи тонкие и стоят через промежутки — большой «сплошной квадрат» они не дают.
+    Сначала ищем обычные зоны; не нашли — ищем ТОНКУЮ зону (FVG / OB высотой в пару свечей)."""
+    h, w = img.shape[:2]
+    boxes = _filled_boxes(img, background, max(9, int(min(h, w) * 0.04)), 0.04)
+    if not boxes:
+        boxes = _filled_boxes(img, background, max(4, int(min(h, w) * 0.008)), 0.012, strict=True)
+    return boxes
+
+
+def _filled_boxes(img, background, k, min_height, strict=False):
     h, w = img.shape[:2]
     diff = np.abs(img.astype(int) - background).sum(axis=2)
     soft = (diff > FILL_DIFF).astype(np.uint8)
-    k = max(9, int(min(h, w) * 0.04))
     solid = cv2.morphologyEx(soft, cv2.MORPH_OPEN, np.ones((k, k), np.uint8))
     count, labels, stats, _ = cv2.connectedComponentsWithStats(solid)
     boxes = []
     for i in range(1, count):
         x, y, bw, bh, area = stats[i]
-        if bw < 0.08 * w or bh < 0.04 * h or area < FILL_SOLID * bw * bh:
+        if strict and bw >= 0.08 * w:
+            # к тонкой зоне прилипают свечи сверху и снизу — рамку зоны берём по строкам, где почти
+            # вся ширина — цвет заливки
+            part = img[y:y + bh, x:x + bw].astype(int)
+            fill = np.median(part[labels[y:y + bh, x:x + bw] == i], axis=0)
+            if np.abs(fill - background).sum() > 3 * FOREGROUND_DIFF:
+                continue                                       # не бледная заливка (тело свечи и т.п.)
+            near = (np.abs(part - fill).sum(axis=2) < FILL_COLOR) & (diff[y:y + bh, x:x + bw] > FILL_DIFF)
+            rows = np.flatnonzero(near.mean(axis=1) >= 0.6)
+            if len(rows) == 0:
+                continue
+            y, bh = y + int(rows[0]), int(rows[-1] - rows[0] + 1)
+            cols = np.flatnonzero(near[rows[0]:rows[-1] + 1].mean(axis=0) >= 0.6)
+            if len(cols) == 0:
+                continue
+            x, bw = x + int(cols[0]), int(cols[-1] - cols[0] + 1)
+            area = int(near[rows[0]:rows[-1] + 1, cols[0]:cols[-1] + 1].sum())
+        # у тонкой зоны строки рамки и сетки внутри не цвета заливки — допускаем меньшую «сплошность»
+        if bw < 0.08 * w or bh < min_height * h or area < (0.6 if strict else FILL_SOLID) * bw * bh:
+            continue
+        if strict and bw < 3 * bh:
+            continue                                           # тонкая зона — вытянута по горизонтали
+        if strict:
+            region = img[y:y + bh, x:x + bw].reshape(-1, 3)
+            boxes.append((int(x), int(y), int(x + bw - 1), int(y + bh - 1), np.median(region, axis=0)))
             continue
         region = img[y:y + bh, x:x + bw][labels[y:y + bh, x:x + bw] == i]
         color = np.median(region, axis=0)
         if np.abs(color - background).sum() > 3 * FOREGROUND_DIFF:
             continue                                           # не бледная заливка, а что-то тёмное / яркое
-        if np.mean(np.abs(region.astype(int) - color).sum(axis=1) < FILL_COLOR) < 0.7:
+        same = np.abs(region.astype(int) - color).sum(axis=1) < FILL_COLOR
+        if np.mean(same) < (0.9 if strict else 0.7):
             continue                                           # не однотонно — это не заливка
         boxes.append((int(x), int(y), int(x + bw - 1), int(y + bh - 1), color))
     return boxes
@@ -816,6 +869,9 @@ def drawn_color_lines(img, min_ratio=0.04):
     background = detect_background(img)
     visible = (np.abs(img.astype(int) - background).sum(axis=2) > FOREGROUND_DIFF) & (hsv[..., 2] >= 80)
     mask = np.where((sat >= 90) & ~candle & visible, 255, 0).astype(np.uint8)
+    strokes = candle_color_strokes(img)               # линии красного / зелёного цвета (как свечи)
+    plain = mask.copy()
+    mask = cv2.bitwise_or(mask, strokes)
     if np.count_nonzero(mask) < 20:
         return []
     h, w = mask.shape
@@ -837,7 +893,45 @@ def drawn_color_lines(img, min_ratio=0.04):
                 break
         else:
             groups.append([seg])
-    return [_merge(g) for g in groups]
+    lines = [_merge(g) for g in groups]
+    for ln in lines:                                  # линия цвета свечи — стирать только её штрих
+        n = max(2, int(ln.length))
+        xs = np.clip(np.linspace(ln.x1, ln.x2, n).round().astype(int), 0, w - 1)
+        ys = np.clip(np.linspace(ln.y1, ln.y2, n).round().astype(int), 0, h - 1)
+        near = cv2.dilate(plain, np.ones((5, 5), np.uint8))[ys, xs] > 0
+        ln.candle_colored = bool(near.mean() < 0.5)
+    return lines
+
+
+STROKE_LEN = 0.035           # штрих цвета свечи — линия, только если длиннее 3.5% ширины скрина
+
+
+def candle_color_strokes(img):
+    """Пиксели красного / зелёного цвета, которые НЕ часть свечей. Свеча — вертикальный столбик
+    (тело и фитиль), а нарисованная линия — длинный тонкий горизонтальный / наклонный штрих.
+    Убираем всё вертикальное — остаются штрихи, нарисованные человеком."""
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    hue, sat = hsv[..., 0].astype(int), hsv[..., 1].astype(int)
+    candle = ((hue >= GREEN_HUE[0]) & (hue <= GREEN_HUE[1])) | (hue <= 12) | (hue >= 160)
+    background = detect_background(img)
+    visible = (np.abs(img.astype(int) - background).sum(axis=2) > FOREGROUND_DIFF) & (hsv[..., 2] >= 80)
+    colored = np.where((sat >= 50) & candle & visible, 255, 0).astype(np.uint8)
+    if np.count_nonzero(colored) < 20:
+        return colored
+    vertical = cv2.morphologyEx(colored, cv2.MORPH_OPEN, np.ones((7, 1), np.uint8))
+    vertical = cv2.dilate(vertical, np.ones((3, 3), np.uint8))
+    rest = cv2.bitwise_and(colored, cv2.bitwise_not(vertical))
+    rest = cv2.morphologyEx(rest, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))   # сглаживание рвёт штрих
+    # тела свечей — широкие прямоугольники: их верх/низ тоже горизонтальны, но короткие (ширина свечи);
+    # оставляем только длинные связные штрихи
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(rest)
+    keep = np.zeros_like(rest)
+    min_len = STROKE_LEN * img.shape[1]
+    for i in range(1, count):
+        x, y, bw, bh, area = stats[i]
+        if max(bw, bh) >= min_len and area <= 4 * max(bw, bh):     # длинный и тонкий
+            keep[labels == i] = 255
+    return keep
 
 
 def _grid_line(img, line):
@@ -858,7 +952,13 @@ def _candle_like(img, line):
     xs = np.linspace(line.x1, line.x2, n).round().astype(int)
     ys = np.linspace(line.y1, line.y2, n).round().astype(int)
     ok = (ys >= 0) & (ys < img.shape[0]) & (xs >= 0) & (xs < img.shape[1])
-    hsv = cv2.cvtColor(img[ys[ok], xs[ok]][None], cv2.COLOR_BGR2HSV)[0].astype(int)
+    pixels = img[ys[ok], xs[ok]]
+    # линию, нарисованную человеком, видно СПЛОШЬ по всей длине (даже красную или зелёную поверх
+    # свечей); у ряда мелких свечей между ними — фон
+    background = detect_background(img)
+    if len(pixels) and np.mean(np.abs(pixels.astype(int) - background).sum(axis=1) > FOREGROUND_DIFF) >= 0.8:
+        return False
+    hsv = cv2.cvtColor(pixels[None], cv2.COLOR_BGR2HSV)[0].astype(int)
     colored = hsv[hsv[:, 1] >= SATURATION_MIN]
     if len(colored) < 0.3 * n:
         return False

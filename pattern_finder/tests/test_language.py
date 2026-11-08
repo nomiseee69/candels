@@ -150,3 +150,22 @@ def test_description_controls_figures_flags_and_range():
             for it in (it for c in cards for it in c["items"]):
                 assert language.check(spec, df, dict(it))[0], (name, seed)
     assert language.parse("вымпел против тренда не нужен", "Вымпел")["require"] == ["trend"]
+
+
+def test_timeframe_ranges_and_figure_slope():
+    """«4ч и выше», «до 4ч», «падающий клин» — частые формулировки трейдеров."""
+    import language
+    assert language.parse("имба только 4ч и выше", "FVG")["timeframes"] == ["4h", "12h", "1d", "1w"]
+    assert language.parse("ОБ от 12ч", "Order Block")["timeframes"] == ["12h", "1d", "1w"]
+    assert language.parse("бос на 4h и ниже", "BOS")["timeframes"] == ["1h", "4h"]
+    assert language.parse("fvg 4h", "FVG")["timeframes"] == ["4h"]
+    wedge = language.parse("падающий клин", "Клин")
+    assert wedge["direction"] == "down" and wedge["slope"]
+    assert any("нисходящая" in line for line in language.describe(wedge))
+    # наклон фигуры, а не «медвежий»: падающий клин = falling_wedge, восходящий не подходит
+    import pandas as pd
+    df = pd.DataFrame({"open": [1.0] * 30, "high": [1.1] * 30, "low": [0.9] * 30, "close": [1.0] * 30})
+    falling = {"kind": "falling_wedge", "start": 5, "end": 25, "upper": (5, 1.1, 25, 1.0), "lower": (5, 0.9, 25, 0.95)}
+    rising = {**falling, "kind": "rising_wedge"}
+    assert language.check(wedge, df, falling)[0] is True
+    assert language.check(wedge, df, rising)[0] is False
