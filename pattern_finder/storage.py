@@ -213,6 +213,17 @@ def set_spec(chat_id, pattern_id, spec):
     return None
 
 
+def update_pattern(chat_id, pattern_id, **fields):
+    """Поменять поля примера (например, направление, если бот понял его наоборот)."""
+    users = load_users()
+    for p in users.get(str(chat_id), {}).get("patterns", []):
+        if p["id"] == pattern_id:
+            p.update(fields)
+            save_users(users)
+            return p
+    return None
+
+
 def get_pattern(chat_id, pattern_id):
     return next((p for p in get_patterns(chat_id) if p["id"] == pattern_id), None)
 

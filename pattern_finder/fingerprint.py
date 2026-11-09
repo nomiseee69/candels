@@ -250,6 +250,14 @@ def item_from_zone(name, df, zone):
     up = float(after["high"].max()) - top if len(after) else 0.0
     down = bottom - float(after["low"].min()) if len(after) else 0.0
     side = "bullish" if up >= down else "bearish"
+    if family == "block" and len(after) >= 3:
+        # блок — опора или сопротивление: где цена в основном была ПОСЛЕ зоны — над ней (бычий) или
+        # под ней (медвежий). Надёжнее, чем один самый дальний выброс
+        closes_after = after["close"].to_numpy(float)
+        mid = (top + bottom) / 2
+        above, below = float(np.mean(closes_after > mid)), float(np.mean(closes_after < mid))
+        if abs(above - below) >= 0.3:
+            side = "bullish" if above > below else "bearish"
     size = float(np.nanmean(atr(df).to_numpy())) or 1.0
     if family == "fvg":
         # три свечи FVG: зону обычно рисуют от 1-й или 2-й свечи — ищем рядом тройку, чья «дыра»
@@ -394,6 +402,10 @@ def screenshot_fingerprint(name, df, drawn_levels=(), zones=(), lines=(), spec=N
         lines = [ln for ln in lines if not ln.get("zone")]
     else:                                          # уровни и флаги — линии; «зоны» из пары линий не нужны
         zones = [z for z in zones if family == "range"] if zones else []
+    if len(zones) > 1:
+        # зон несколько (пример + старая зона рядом, обрывок рамки) — главная та, что крупнее:
+        # свою зону трейдер обычно тянет вправо до края графика
+        zones = [max(zones, key=lambda z: (z.get("end", z["start"]) - z["start"] + 1) * (z["top"] - z["bottom"]))]
     best = None
     matched = 0.0
     candidates = all_items(name, df)
@@ -428,7 +440,9 @@ def screenshot_fingerprint(name, df, drawn_levels=(), zones=(), lines=(), spec=N
         fallback = item_from_line(name, df, max(flat, key=lambda ln: ln["x1"] - ln["x0"]))
         if fallback is not None:
             best = (0, fallback)
-    sloped = [ln for ln in lines if not ln["flat"]] or [ln for ln in lines]
+    sloped = [ln for ln in lines if not ln["flat"]]
+    if len(sloped) < 2:                            # одна сторона вымпела / флага бывает почти горизонтальной
+        sloped = list(lines)
     if not zones and family == "flags" and len(sloped) >= 2 and matched < 0.6:    # тело флага — по твоим линиям
         fallback = item_from_lines(name, df, sloped)
         if fallback is not None:

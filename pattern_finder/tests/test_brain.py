@@ -199,3 +199,24 @@ def test_user_fixes_what_bot_understood_with_buttons(tmp_path):
         brain.load_config = saved
         rec.restore()
         storage.FILE = original
+
+
+def test_screenshot_direction_can_be_flipped(tmp_path):
+    """Бот понял направление на скрине наоборот — «🔄 Нет, это медвежий» меняет пример и его отпечаток."""
+    bot, storage, rec, original, _ = chat_bot(tmp_path)
+    try:
+        pid = storage.add_pattern(5, "FVG", None, note="скрин", kind="bullish_fvg",
+                                  fingerprint={"family": "fvg", "kind": "bullish_fvg", "bullish": True})
+        keyboard = bot.example_keyboard(pid, {"kind": "bullish_fvg"})
+        assert any(b.get("callback_data") == f"flipdir:{pid}" and "медвежий" in b["text"]
+                   for row in keyboard["inline_keyboard"] for b in row)
+        assert not any("flipdir" in (b.get("callback_data") or "") for row in
+                       bot.example_keyboard(pid, {"kind": "bos"})["inline_keyboard"] for b in row)
+        bot.handle_callback({"id": "q", "data": f"flipdir:{pid}", "from": {"id": 5},
+                             "message": {"chat": {"id": 5}, "message_id": 9}})
+        p = storage.get_pattern(5, pid)
+        assert p["kind"] == "bearish_fvg" and p["fingerprint"]["kind"] == "bearish_fvg"
+        assert p["fingerprint"]["bullish"] is False and "медвежий" in rec.sent[-1][0]
+    finally:
+        rec.restore()
+        storage.FILE = original

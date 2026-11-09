@@ -538,11 +538,20 @@ def _groups(cols):
         else:
             merged.append(g)
     groups = merged
+    # шаг между свечами — по одиночным свечам (у них центр точно на месте). На плотном графике
+    # соседние свечи одного цвета сливаются в одну группу — делим её по ШАГУ, а не по ширине тела
+    singles = [float(np.mean(g)) for g in groups if len(g) <= 1.5 * width]
+    step = float(np.median(np.diff(singles))) if len(singles) > 10 else 0.0
+    if step < width or step > 4 * width:
+        step = 0.0
     result = []
     for g in groups:
         if len(g) > 3 * max(width, 2) and _rectangle(cols, g):
             continue                       # ровный цветной прямоугольник — ярлык, таблица, зона, а не свечи
-        parts = max(1, round(len(g) / width)) if len(g) > 2.5 * width else 1
+        if step and len(g) > 1.5 * step:
+            parts = max(1, int(round((len(g) + step - width) / step)))
+        else:
+            parts = max(1, round(len(g) / width)) if len(g) > 2.5 * width else 1
         result += [list(p) for p in np.array_split(g, parts)]
     # по краям отбрасываем «острова» после большого пропуска и узкие обрывки
     # (подписи шкалы цены, значки) — пока край не станет похож на ряд свечей
@@ -742,8 +751,11 @@ def filled_boxes(img, background):
     Сначала ищем обычные зоны; не нашли — ищем ТОНКУЮ зону (FVG / OB высотой в пару свечей)."""
     h, w = img.shape[:2]
     boxes = _filled_boxes(img, background, max(9, int(min(h, w) * 0.04)), 0.04)
-    if not boxes:
-        boxes = _filled_boxes(img, background, max(4, int(min(h, w) * 0.008)), 0.012, strict=True)
+    # тонкие зоны ищем всегда: на скрине бывает и крупная зона, и тонкая (FVG рядом с OB)
+    for thin in _filled_boxes(img, background, max(4, int(min(h, w) * 0.008)), 0.012, strict=True):
+        if not any(min(thin[2], b[2]) > max(thin[0], b[0]) and min(thin[3], b[3]) > max(thin[1], b[1])
+                   for b in boxes):
+            boxes.append(thin)
     return boxes
 
 

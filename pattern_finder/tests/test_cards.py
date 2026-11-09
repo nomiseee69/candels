@@ -40,7 +40,7 @@ def test_pine_current_triangle_lines_end_at_apex():
     code = pine_script("BTCUSDT", "4h", [(df, items, False)])
     t10 = int(df["open_time"].iloc[10].timestamp() * 1000)
     assert code.startswith("//@version=5")
-    assert 'indicator("Pattern Finder v49 · BTCUSDT 4H", overlay=true' in code
+    assert 'indicator("Pattern Finder v51 · BTCUSDT 4H", overlay=true' in code
     assert f"line.new({t10}, 110," in code
     assert code.count("line.new(") == 2
     assert "extend.right" not in code                 # линии не уходят в бесконечность

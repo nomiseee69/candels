@@ -77,8 +77,12 @@ def kind_from_drawing(lines):
     right = min(a.x2, b.x2)
     if right <= left:
         return None
+    # наклон меряем по ВСЕЙ фигуре — от начала более длинной линии: короткая вторая линия
+    # (её часто рисуют позже) иначе делает наклонную сторону «горизонтальной»
+    common = left                                  # где видны обе линии — там понятно, какая сверху
+    left = min(a.x1, b.x1)
     # на картинке y растёт вниз: меньший y — выше
-    top, bottom = (a, b) if a.y_at(left) < b.y_at(left) else (b, a)
+    top, bottom = (a, b) if a.y_at(common) < b.y_at(common) else (b, a)
     gap_start = bottom.y_at(left) - top.y_at(left)
     gap_end = bottom.y_at(right) - top.y_at(right)
     if gap_start <= 0:

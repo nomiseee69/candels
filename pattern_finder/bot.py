@@ -30,6 +30,7 @@ from texts import finding_name
 from storage import (
     add_feedback, add_pattern, clear_feedback, delete_pattern, first_visit, get_autoscan, get_coins,
     get_feedback, get_intervals, get_pattern, get_patterns, get_settings, set_coins, set_spec, toggle_autoscan,
+    update_pattern,
     toggle_interval, toggle_setting,
 )
 from chart import plot_example, plot_findings
@@ -1036,12 +1037,38 @@ DESCRIBE_TEXT = (
 BRAIN_TIP = "\n\n🧠 Пиши как удобно, своими словами и сленгом — я пойму."
 
 
-def example_keyboard(pattern_id):
-    return {"inline_keyboard": [
-        [{"text": "✅ Верно", "callback_data": f"ok:{pattern_id}"},
-         {"text": "❌ Нет, удалить", "callback_data": f"bad:{pattern_id}"}],
-        [{"text": "✏️ Описать словами", "callback_data": f"describe:{pattern_id}"}],
-    ]}
+def example_keyboard(pattern_id, item=None):
+    rows = [[{"text": "✅ Верно", "callback_data": f"ok:{pattern_id}"},
+             {"text": "❌ Нет, удалить", "callback_data": f"bad:{pattern_id}"}]]
+    kind = str((item or {}).get("kind", ""))
+    if kind.startswith(("bullish", "bearish")):        # бот понял направление наоборот — поправь одной кнопкой
+        other = "медвежий" if kind.startswith("bullish") else "бычий"
+        rows.append([{"text": f"🔄 Нет, это {other}", "callback_data": f"flipdir:{pattern_id}"}])
+    rows.append([{"text": "✏️ Описать словами", "callback_data": f"describe:{pattern_id}"}])
+    return {"inline_keyboard": rows}
+
+
+def flip_direction(chat_id, message_id, pattern_id):
+    """«🔄 Нет, это медвежий»: меняем направление примера (и его отпечатка) на противоположное."""
+    example = get_pattern(chat_id, pattern_id)
+    if example is None:
+        send_message("Этот пример уже удалён.", chat_id, {"inline_keyboard": [[TO_MENU]]})
+        return
+    swap = lambda k: (k.replace("bullish", "§").replace("bearish", "bullish").replace("§", "bearish")
+                      if isinstance(k, str) else k)
+    kind = swap(example.get("kind"))
+    fp = dict(example.get("fingerprint") or {})
+    if fp:
+        fp["kind"] = swap(fp.get("kind"))
+        fp["bullish"] = not fp.get("bullish", True)
+    update_pattern(chat_id, pattern_id, kind=kind, fingerprint=fp or example.get("fingerprint"))
+    word = "бычий" if str(kind).startswith("bullish") else "медвежий"
+    edit_keyboard(chat_id, message_id, {"inline_keyboard": [
+        [{"text": f"✅ Запомнил: {word}", "callback_data": f"ok:{pattern_id}"}],
+        [{"text": "✏️ Описать словами", "callback_data": f"describe:{pattern_id}"}]]})
+    send_message(f"🔄 Понял, это {word} «{example['name']}». Буду искать такие.", chat_id,
+                 saved_keyboard(ALL_PATTERNS.index(example["name"])) if example["name"] in ALL_PATTERNS
+                 else {"inline_keyboard": [[TO_MENU]]})
 
 
 def understood_text(spec):
@@ -1295,7 +1322,7 @@ def receive_example(chat_id, name, path):
     caption = (f"Вот что я увидел на твоём скрине:\n• {kind_text(item)}\n{drawn}"
                f"{understood}\n"
                "Буду искать похожие. Я правильно нашёл паттерн?")
-    keyboard = example_keyboard(pattern_id)
+    keyboard = example_keyboard(pattern_id, item)
     send_photo(debug_path, caption[:CAPTION_LIMIT], chat_id, keyboard)
     remove_file(debug_path)
 
@@ -2378,6 +2405,10 @@ def handle_callback(query):
 
     if action == "describe":                   # описать пример словами
         start_describing(chat_id, value)
+        return
+
+    if action == "flipdir":                     # бот понял направление примера наоборот
+        flip_direction(chat_id, message_id, value)
         return
 
     if action in ("spok", "spflip", "sprm"):    # поправить, как бот понял описание
