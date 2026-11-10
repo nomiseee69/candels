@@ -280,6 +280,8 @@ def plan_line(chat_id):
     st = billing.status(chat_id)
     if st["admin"]:
         return "Тариф: 💎 Pro (админ)"
+    if st.get("forever"):
+        return "Тариф: ♾ Pro навсегда"
     if st["pro"]:
         left = billing.days_left(st["until"])
         name = "🎁 Pro, пробный период" if st["trial"] else "💎 Pro"
@@ -296,6 +298,8 @@ def profile_view(chat_id):
     lines = [f"👤 Профиль · ID {chat_id}", ""]
     if st["admin"]:
         lines.append("Тариф: 💎 Pro навсегда (ты админ)")
+    elif st.get("forever"):
+        lines.append("Тариф: ♾ Pro навсегда — подарок, без срока окончания")
     elif st["pro"]:
         left = billing.days_left(st["until"])
         lines.append("Тариф: " + ("🎁 Pro — пробный период" if st["trial"] else "💎 Pro"))
@@ -409,7 +413,7 @@ def handle_pre_checkout(query):
 
 # --- админ ------------------------------------------------------------------------------------------
 ADMIN_HELP = ("🛠 Админ-панель — всё кнопками ниже. Команды тоже работают (вместо ID можно @username):\n"
-              "/grant @user 30 — выдать Pro на 30 дней · /revoke @user — забрать Pro\n"
+              "/grant @user 30 — выдать Pro на 30 дней · /grant @user навсегда — без срока · /revoke @user — забрать Pro\n"
               "/user @user — карточка · /refund @user — вернуть последнюю оплату звёздами\n"
               "/broadcast текст — сообщение всем · /backup — копия базы")
 USERS_PAGE = 8
@@ -473,8 +477,9 @@ def users_view(page=0):
     rows = []
     for key, user in part:
         st = billing.status(int(key))
-        mark = "👑" if st["admin"] else ("💎" if st["pro"] and not st["trial"] else "🎁" if st["pro"] else "🆓")
-        until = f" до {billing.until_text(st['until'])}" if st["pro"] and not st["admin"] else ""
+        mark = "👑" if st["admin"] else "♾" if st.get("forever") else (
+            "💎" if st["pro"] and not st["trial"] else "🎁" if st["pro"] else "🆓")
+        until = f" до {billing.until_text(st['until'])}" if st["pro"] and st["until"] else ""
         rows.append([{"text": f"{mark} {user_title(key, user)}{until}", "callback_data": f"adm:u:{key}"}])
     nav = []
     if page > 0:
@@ -493,7 +498,7 @@ def user_card(key):
     user = storage.get_user(key)
     st = billing.status(key)
     names = sorted({p["name"] for p in user.get("patterns", [])})
-    plan = ("👑 админ" if st["admin"] else
+    plan = ("👑 админ" if st["admin"] else "♾ Pro навсегда" if st.get("forever") else
             (("🎁 пробный Pro" if st["trial"] else "💎 Pro") + f" до {billing.until_text(st['until'])}, "
              f"осталось {billing.days_left(st['until'])} дн." if st["pro"] else "🆓 Free"))
     paid = billing.history(key)[:5]
@@ -507,6 +512,7 @@ def user_card(key):
                   + (" (возвращена)" if p.get("status") == "refunded" else "") for p in paid]
     rows = [[{"text": "🎁 +30 дней Pro", "callback_data": f"adm:grant:{key}:30"},
              {"text": "🎁 +365 дней", "callback_data": f"adm:grant:{key}:365"}],
+            [{"text": "♾ Pro навсегда", "callback_data": f"adm:grant:{key}:forever"}],
             [{"text": "⛔ Забрать Pro (сразу Free)", "callback_data": f"adm:revoke:{key}"}]]
     if any(p["currency"] == "XTR" and p.get("status") != "refunded" for p in paid):
         rows.append([{"text": "↩️ Вернуть последнюю оплату звёздами", "callback_data": f"adm:refund:{key}"}])
@@ -516,6 +522,10 @@ def user_card(key):
 
 
 def admin_grant(admin_id, key, days):
+    if days is None:                                     # навсегда
+        billing.grant_forever(key)
+        send_message("🎁 Тебе выдан Pro навсегда — все функции без ограничений. Спасибо, что с нами!", key)
+        return f"✅ {user_title(key)}: ♾ Pro навсегда"
     until = billing.extend(key, days, source="admin")
     send_message(f"🎁 Тебе выдан Pro до {billing.until_text(until)}.", key)
     return f"✅ {user_title(key)}: Pro до {billing.until_text(until)}"
@@ -547,7 +557,7 @@ def admin_callback(chat_id, message_id, value, media):
     elif action == "u":
         show_view(chat_id, message_id, user_card(parts[1]), media)
     elif action == "grant":
-        text = admin_grant(chat_id, int(parts[1]), int(parts[2]))
+        text = admin_grant(chat_id, int(parts[1]), None if parts[2] == "forever" else int(parts[2]))
         show_view(chat_id, message_id, user_card(parts[1]), media)
         send_message(text, chat_id)
     elif action == "revoke":
@@ -603,7 +613,9 @@ def admin_command(chat_id, command, argument):
     elif command == "/user":
         show_view(chat_id, None, user_card(who))
     elif command == "/grant":
-        days = int(args[1]) if len(args) > 1 and args[1].isdigit() else 30
+        word = args[1].lower() if len(args) > 1 else ""
+        forever = word in ("навсегда", "forever", "∞", "0", "бессрочно")
+        days = None if forever else int(word) if word.isdigit() else 30
         send_message(admin_grant(chat_id, who, days), chat_id)
     elif command == "/revoke":
         billing.revoke(who)

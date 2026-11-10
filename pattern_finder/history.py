@@ -91,7 +91,7 @@ def _breakout(df, found, horizon=HORIZON):
     return None
 
 
-def history_lines(df, family, windows, min_score):
+def history_lines(df, family, windows, min_score, step=None):
     highs = df["high"].tolist()
     lows = df["low"].tolist()
     closes = df["close"].tolist()
@@ -99,7 +99,7 @@ def history_lines(df, family, windows, min_score):
     found = []
     for w in windows:
         # длинные окна двигаем крупнее: фигура на 250 свечей не меняется от сдвига на 5
-        for end in range(w, n + 1, max(LINE_STEP, w // 10)):
+        for end in range(w, n + 1, step or max(LINE_STEP, w // 10)):
             f = _analyze_window(highs[end - w:end], lows[end - w:end], closes[end - w:end])
             if f is None or f["kind"] not in family or f["score"] < min_score:
                 continue
@@ -324,6 +324,12 @@ def read_lines_figure(name, path):
     n = len(df)
     windows = [w for w in WINDOWS if w <= n] + [w for w in (40, 65, 100) if w <= n]   # как на рынке + промежуточные
     found = history_lines(df, FAMILY_BY_PATTERN[name], windows, 0.6)
+    if not found:
+        # на скрине свечей немного — можно искать подробнее: окна через 5 свечей, сдвиг по 2,
+        # и чуть мягче к ровности линий (свечи со скрина в пикселях, касания чуть «шумят»)
+        fine = sorted(set(range(30, n + 1, 5)) | set(windows))
+        found = history_lines(df, FAMILY_BY_PATTERN[name], fine, 0.6, step=2) \
+            or history_lines(df, FAMILY_BY_PATTERN[name], fine, 0.5, step=2)
     if not found:
         return None
     # фигура, ради которой делали скрин, обычно крупная и ближе к правому краю

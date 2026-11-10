@@ -352,3 +352,32 @@ def test_admin_panel_buttons_and_username(tmp_path, monkeypatch):
     finally:
         rec.restore()
         storage.FILE = original
+
+
+def test_admin_grants_pro_forever(tmp_path, monkeypatch):
+    """«/grant @user навсегда» и кнопка «♾ Pro навсегда»: Pro без срока, без напоминаний, снимается /revoke."""
+    import bot
+    from test_menus import Recorder
+    monkeypatch.setenv("ADMIN_IDS", "1")
+    rec = Recorder()
+    original = use_db(tmp_path)
+    try:
+        for uid, name in ((5, "makson1323"), (6, "ddd_mmmmm0"), (7, "hrmxxx")):
+            bot.handle_message({"chat": {"id": uid}, "from": {"id": uid, "username": name}, "text": "привет"})
+        bot.handle_message({"chat": {"id": 1}, "from": {"id": 1}, "text": "/grant @makson1323 навсегда"})
+        assert "♾ Pro навсегда" in rec.sent[-1][0] and any("навсегда" in t for t, _ in rec.sent)
+        bot.handle_callback({"id": "c", "data": "adm:grant:6:forever", "message": {"chat": {"id": 1}, "message_id": 9}})
+        bot.handle_message({"chat": {"id": 1}, "from": {"id": 1}, "text": "/grant @hrmxxx forever"})
+        later = time.time() + 20 * 365 * DAY
+        for uid in (5, 6, 7):
+            assert billing.is_pro(uid) and billing.is_pro(uid, now=later) and billing.status(uid)["forever"]
+            assert "навсегда" in bot.plan_line(uid) and "навсегда" in bot.profile_view(uid)[0]
+        assert not [r for r in billing.reminders(now=later) if r[0] in (5, 6, 7)]
+        card = bot.user_card(5)
+        assert "♾ Pro навсегда" in card[0]
+        assert any(b["callback_data"] == "adm:grant:5:forever" for row in card[1]["inline_keyboard"] for b in row)
+        bot.handle_message({"chat": {"id": 1}, "from": {"id": 1}, "text": "/revoke @hrmxxx"})
+        assert not billing.is_pro(7)
+    finally:
+        rec.restore()
+        storage.FILE = original

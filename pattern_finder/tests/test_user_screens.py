@@ -104,3 +104,16 @@ def test_real_tradingview_full_window_light():
         candles = vision.extract_candles(os.path.join(HERE, name))
         assert candles is not None and low <= len(candles) <= high, (name, None if candles is None else len(candles))
         assert _sane(candles), name
+
+
+def test_zone_side_next_to_candles_is_not_a_wick():
+    """Скрин пользователя: левая сторона зоны вплотную к маленькой свече сверху и к большой красной
+    свече справа. Раньше сторона рамки приклеивалась к маленькой свече — у неё появлялась длинная
+    «тень» на всю высоту зоны, а у красной свечи срезалось тело."""
+    candles, zones, _ = vision.extract_marks(os.path.join(HERE, "user_fvg_box_side.png"))
+    assert candles is not None and zones
+    zone = zones[0]
+    height = zone["top"] - zone["bottom"]
+    first, big = candles.iloc[zone["start"]], candles.iloc[zone["start"] + 1]
+    assert first["high"] - first["low"] < 0.35 * height                  # у маленькой свечи нет «тени» рамки
+    assert big["close"] < big["open"] and big["open"] > zone["top"] - 0.2 * height   # тело красной — от верха зоны

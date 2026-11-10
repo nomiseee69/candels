@@ -84,6 +84,9 @@ def status(chat_id, now=None):
         return {"pro": True, "until": None, "source": "admin", "trial": False, "admin": True}
 
     sub = storage.get_user(chat_id).get("sub") or {}
+    if sub.get("forever"):                              # админ выдал Pro без срока
+        return {"pro": True, "until": None, "source": "forever", "trial": False, "admin": False,
+                "recurring": False, "forever": True}
     if not sub.get("trial_used"):                       # пишем в базу только один раз — при выдаче пробного
 
         def give_trial(user):
@@ -129,9 +132,20 @@ def extend(chat_id, days=None, source="admin", until=None, recurring=False, now=
     return storage.update_user(chat_id, change)
 
 
+def grant_forever(chat_id):
+    """Pro навсегда (подарок от админа): без даты окончания и без напоминаний."""
+    def change(user):
+        sub = _sub(user)
+        sub.update(forever=True, trial_used=True, source="forever", recurring=False, reminded=None,
+                   expired_told=False)
+        return True
+    return storage.update_user(chat_id, change)
+
+
 def revoke(chat_id, now=None):
     now = now or time.time()
-    return storage.update_user(chat_id, lambda u: _sub(u).update(until=now - 1, recurring=False, trial_used=True))
+    return storage.update_user(chat_id, lambda u: _sub(u).update(until=now - 1, recurring=False, trial_used=True,
+                                                                 forever=False))
 
 
 def until_text(until):
@@ -350,7 +364,7 @@ def reminders(now=None):
     for key, user in storage.load_users().items():
         sub = user.get("sub") or {}
         until = sub.get("until") or 0
-        if not until or is_admin(int(key)):
+        if not until or is_admin(int(key)) or sub.get("forever"):
             continue
         left = until - now
         window = (1 if sub.get("source") == "trial" else REMIND_DAYS) * DAY     # пробный — за сутки
@@ -379,7 +393,7 @@ def stats(now=None):
     now = now or time.time()
     users = storage.load_users()
     subs = [u.get("sub") or {} for u in users.values()]
-    pro = sum((s.get("until") or 0) > now and s.get("source") != "trial" for s in subs)
+    pro = sum(bool(s.get("forever")) or ((s.get("until") or 0) > now and s.get("source") != "trial") for s in subs)
     trial = sum((s.get("until") or 0) > now and s.get("source") == "trial" for s in subs)
     paid = storage.payments(since=now - 30 * DAY)
     stars = sum(p["amount"] for p in paid if p["currency"] == "XTR")

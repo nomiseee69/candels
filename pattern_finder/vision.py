@@ -826,6 +826,13 @@ def erase_boxes(img, boxes, background):
     return clean
 
 
+def colored_like_candle(pixels):
+    """Пиксели насыщенного зелёного / красного — цвета свечей."""
+    hsv = cv2.cvtColor(pixels.reshape(-1, 1, 3).astype(np.uint8), cv2.COLOR_BGR2HSV).reshape(-1, 3).astype(int)
+    hue, sat = hsv[:, 0], hsv[:, 1]
+    return (sat >= 120) & (((hue >= GREEN_HUE[0]) & (hue <= GREEN_HUE[1])) | (hue <= 10) | (hue >= 165))
+
+
 def _erase_outline(clean, img, box, background, reach=14):
     """Рамка прямоугольника ЛЮБОГО цвета (красная, голубая…): тонкие линии по краям зоны
     (± несколько пикселей от края заливки). Строки и столбцы рамки — те, где почти по всей длине
@@ -848,6 +855,9 @@ def _erase_outline(clean, img, box, background, reach=14):
     xs = slice(max(0, left - reach), min(w, right + reach + 1))
     # цвет рамки — по середине горизонтальных сторон (там нет свечей)
     color = np.median(np.concatenate([img[y, inner_x].reshape(-1, 3) for y in rows]).astype(int), axis=0)
+    # «чистый» цвет рамки — самая яркая (непохожая на фон) строка стороны; по краям сглаживание
+    row_colors = [np.median(img[y, inner_x].reshape(-1, 3).astype(int), axis=0) for y in rows]
+    pure = max(row_colors, key=lambda c: np.abs(c - background).sum())
     for a, b in _clusters(rows, gap=2):
         a, b = max(0, a - 1), min(h - 1, b + 1)        # с краями сглаживания
         # свеча, которая проходит СКВОЗЬ сторону рамки (есть «не фон» и над, и под полосой), — не трогаем
@@ -858,7 +868,18 @@ def _erase_outline(clean, img, box, background, reach=14):
     # вертикальные стороны: стираем, но только там, где «не фон» по горизонтали узкий (сама линия
     # рамки); если рядом широкое тело свечи — это свеча, её не трогаем
     for c0, c1 in _clusters(cols, gap=2):
-        c0, c1 = max(0, c0 - 1), min(w - 1, c1 + 1)
+        # к стороне рамки может вплотную стоять свеча — в рамку берём только столбцы цвета рамки
+        framed = [x for x in range(c0, c1 + 1)
+                  if np.median(np.abs(img[y0:y1 + 1, x].astype(int) - pure).sum(axis=-1)) < 220]
+        if not framed:
+            continue
+        c0, c1 = min(framed), max(framed)
+        # сглаживание по краям линии — тоже рамка, но не соседняя свеча
+        edge = lambda x: 0 <= x < w and np.median(np.abs(img[y0:y1 + 1, x].astype(int) - background).sum(axis=-1)) \
+            < np.median(np.abs(img[y0:y1 + 1, x].astype(int) - pure).sum(axis=-1)) + 60 \
+            and not np.any(colored_like_candle(img[y0:y1 + 1, x]))
+        c0 = c0 - 1 if edge(c0 - 1) else c0
+        c1 = c1 + 1 if edge(c1 + 1) else c1
         line = c1 - c0 + 1
         # свеча стоит ровно на стороне рамки и продолжается за её пределы (выше или ниже) — не трогаем
         beyond = lambda rows: max((differs[rows, x].sum() for x in range(c0, c1 + 1)), default=0)
@@ -866,11 +887,9 @@ def _erase_outline(clean, img, box, background, reach=14):
         # пиксели цвета рамки (свеча другого цвета остаётся целой)
         candle_on_side = (beyond(slice(max(0, y0 - 9), max(0, y0 - 1))) >= 5
                           or beyond(slice(min(h, y1 + 2), min(h, y1 + 10))) >= 5)
+        # (даже если сверху / снизу к стороне примыкает свеча: внутри высоты зоны тонкая вертикаль —
+        # это рамка; сжатый скрин даёт рамке «промежуточные» цвета, по цвету её не стереть)
         for y in range(y0, y1 + 1):
-            if candle_on_side:
-                part = clean[y, c0:c1 + 1]
-                part[np.abs(img[y, c0:c1 + 1].astype(int) - color).sum(axis=-1) < 110] = background.astype(np.uint8)
-                continue
             # сплошной «не фон» вокруг рамки в этой строке: если он намного шире самой линии —
             # рядом тело свечи, строку не трогаем
             lo = c0
@@ -883,7 +902,9 @@ def _erase_outline(clean, img, box, background, reach=14):
                 clean[y, c0:c1 + 1] = background.astype(np.uint8)
             else:                                        # рядом свеча: стираем только цвет рамки
                 part = clean[y, c0:c1 + 1]
-                part[np.abs(img[y, c0:c1 + 1].astype(int) - color).sum(axis=-1) < 110] = background.astype(np.uint8)
+                px = img[y, c0:c1 + 1].astype(int)
+                frame_px = (np.abs(px - color).sum(axis=-1) < 110) | (np.abs(px - pure).sum(axis=-1) < 160)
+                part[frame_px] = background.astype(np.uint8)
 
 
 def _long_runs(mask, axis, share):
