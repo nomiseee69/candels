@@ -335,8 +335,18 @@ def item_from_line(name, df, line):
     closes, highs, lows = (df[k].to_numpy(float) for k in ("close", "high", "low"))
     if family == "structure":
         # линия идёт от свинга: если уровень у хая свечи — это свинг-хай, слом — закрытие ВЫШЕ
-        up = level >= (highs[x0] + lows[x0]) / 2
-        broke = next((i for i in range(x0 + 1, n) if (closes[i] > level if up else closes[i] < level)), None)
+        # к чему линия ближе у своего начала — к хаю свечи (слом вверх) или к лою (слом вниз);
+        # смотрим и соседние свечи: линию редко начинают точно от нужной
+        near = range(max(0, x0 - 1), min(n, x0 + 2))
+        up = min(abs(level - highs[i]) for i in near) < min(abs(level - lows[i]) for i in near)
+        find = lambda up: next((i for i in range(x0 + 1, n) if (closes[i] > level if up else closes[i] < level)), None)
+        broke = find(up)
+        if broke is None:
+            # закрытия за уровнем не видно (на скрине это бывает доля пикселя) — хватит и прокола тенью
+            broke = next((i for i in range(x0 + 2, n) if (highs[i] > level if up else lows[i] < level)), None)
+        if broke is None:                              # в эту сторону цена уровень не пробила — значит, в другую
+            up = not up
+            broke = find(up)
         if broke is None:
             return None
         size = float(np.nanmean(atr(df).to_numpy())) or 1.0
@@ -443,6 +453,14 @@ def screenshot_fingerprint(name, df, drawn_levels=(), zones=(), lines=(), spec=N
         if fallback is not None:
             best = (0, fallback)
     flat = [ln for ln in lines if ln["flat"]]
+    # линия через ВЕСЬ график от первой до последней свечи — это пунктир последней цены или сетка
+    # программы, а не уровень, который провёл человек (свой уровень начинают от свинга)
+    own = [ln for ln in flat if not (ln["x0"] <= 1 and ln["x1"] >= n - 2)]
+    if own and len(own) < len(flat):
+        flat = own
+        lines = [ln for ln in lines if not ln["flat"] or ln in own]
+        if matched < ZONE_MATCH and family in ("structure", "eq"):
+            best = None                                # пересчитаем по линии человека ниже
     if not zones and flat and family in ("structure", "eq") and matched < ZONE_MATCH:
         fallback = item_from_line(name, df, max(flat, key=lambda ln: ln["x1"] - ln["x0"]))
         if fallback is not None:
