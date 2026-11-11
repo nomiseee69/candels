@@ -34,7 +34,7 @@ from storage import (
     toggle_interval, toggle_setting,
 )
 from chart import plot_example, plot_findings
-from guide import COMMANDS, DEMO_LEGEND, PATTERN_INFO, WELCOME
+from guide import COMMANDS, DEMO_LEGEND, GLOSSARY, PATTERN_INFO, WELCOME
 from templates import template_shape
 from feedback import (MIN_VOTES_FIT, features, item_window, learn, make_judge, rule_text,
                       what_changed, with_learning)
@@ -601,7 +601,7 @@ def admin_command(chat_id, command, argument):
         return False
     if not billing.is_admin(chat_id):
         return False
-    args = argument.split()
+    args = [a.strip(",;") for a in argument.replace(",", " ").split() if a.strip(",;")]
     who = find_user_id(args[0]) if args else None
     if command == "/admin":
         show_view(chat_id, None, admin_view(chat_id))
@@ -613,10 +613,19 @@ def admin_command(chat_id, command, argument):
     elif command == "/user":
         show_view(chat_id, None, user_card(who))
     elif command == "/grant":
-        word = args[1].lower() if len(args) > 1 else ""
-        forever = word in ("навсегда", "forever", "∞", "0", "бессрочно")
-        days = None if forever else int(word) if word.isdigit() else 30
-        send_message(admin_grant(chat_id, who, days), chat_id)
+        # «/grant @a @b @c навсегда», «/grant @a 90», «/grant @a» (30 дней)
+        words = [a.lower().strip(",.") for a in args]
+        forever = any(w in ("навсегда", "forever", "∞", "бессрочно", "вечно", "0") for w in words)
+        number = next((int(w) for w in words[1:] if w.isdigit() and w != "0" and len(w) <= 4), None)
+        days = None if forever else number or 30
+        person = lambda a: a.startswith("@") or (a.isdigit() and len(a) > 4)     # @ник или Telegram ID
+        others = [a for a in args[1:] if person(a)]
+        people = [who] + [find_user_id(a) for a in others]
+        missing = [a for a in others if find_user_id(a) is None]
+        for key in dict.fromkeys(p for p in people if p is not None):
+            send_message(admin_grant(chat_id, key, days), chat_id)
+        if missing:
+            send_message("Не нашёл: " + ", ".join(missing) + " — пусть сначала напишут боту /start.", chat_id)
     elif command == "/revoke":
         billing.revoke(who)
         send_message(f"⛔ {user_title(who)}: Pro снят, теперь Free.", chat_id)
@@ -1207,32 +1216,96 @@ def receive_description(chat_id, pattern_id, text):
                  chat_id, spec_keyboard(pattern_id, spec))
 
 
+NOT_UNDERSTOOD = ("🤔 Не понял. Мне можно написать так:\n"
+                  "• SOL — проверю монету\n"
+                  "• скан — поищу паттерны на рынке\n"
+                  "• что такое FVG — объясню\n"
+                  "• бычий OB с объёмом на 4ч — запомню, каким должен быть твой паттерн")
+
+
+def explain(chat_id, wish):
+    """«Что такое FVG?», «объясни ликвидность» — короткий ответ сразу, без нейросети."""
+    name, term = wish.get("pattern"), wish.get("term")
+    if name:
+        index = ALL_PATTERNS.index(name)
+        opened = "gal" if examples_of(chat_id, index) else "pick"
+        rows = [[{"text": f"🧩 Открыть «{name}»", "callback_data": f"{opened}:{index}" + (":0" if opened == "gal" else "")},
+                 {"text": "👀 Пример с рынка", "callback_data": f"demo:{index}"}], [TO_MENU]]
+        send_message(f"🧩 {name}\n\n{PATTERN_INFO[name]}", chat_id, {"inline_keyboard": rows})
+    else:
+        send_message(f"📖 {GLOSSARY[term]}", chat_id, {"inline_keyboard": [[TO_MENU]]})
+
+
+def quick_reply(chat_id, wish):
+    """Простая просьба, понятая словарём (language.quick_intent). True — если ответили."""
+    kind = wish["intent"]
+    if kind == "explain":
+        explain(chat_id, wish)
+    elif kind == "coin":
+        find_coin(chat_id, wish["coin"])
+    elif kind == "scan":
+        start_job(chat_id, run_scan)
+    elif kind == "history":
+        start_job(chat_id, run_history)
+    elif kind == "learning":
+        show_view(chat_id, None, learning_view(chat_id))
+    elif kind == "subscribe":
+        show_view(chat_id, None, subscription_view(chat_id))
+    elif kind == "profile":
+        show_view(chat_id, None, profile_view(chat_id))
+    elif kind == "settings":
+        show_view(chat_id, None, settings_view(chat_id))
+    elif kind == "patterns":
+        show_view(chat_id, None, my_patterns_view(chat_id))
+    elif kind == "help":
+        send_welcome(chat_id)
+    elif kind == "pattern":                          # просто «фвг» — открываем этот паттерн
+        index = ALL_PATTERNS.index(wish["pattern"])
+        if examples_of(chat_id, index):
+            show_gallery(chat_id, index, 0)
+        else:
+            show_view(chat_id, None, intro_view(chat_id, index))
+    elif kind in ("menu", "autoscan"):               # автоскан включается кнопкой в меню
+        show_menu(chat_id)
+    else:
+        return False
+    return True
+
+
 def free_text(chat_id, text):
-    """Свободное сообщение в чате. С нейросетью (brain.py) бот понимает, чего хочет человек:
-    описывает паттерн, спрашивает о трейдинге, просит скан или монету. Без неё — словарь:
-    назван паттерн и есть условия → это описание; иначе меню."""
+    """Свободное сообщение в чате. Бот понимает, чего хочет человек, в три шага:
+    1) словарь: назван паттерн и есть условия → это описание («FVG на 4ч, свежий»);
+    2) словарь: простая просьба → сразу делаем («скан», «покажи биткоин», «что такое фвг») —
+       мгновенно и у всех, опечатки и чужая раскладка не мешают;
+    3) нейросеть (brain.py, Pro) — для всего остального: вопросы, сложные формулировки.
+    Никто не понял — подсказываем, как можно написать."""
     wish = None
     named = language.detect_pattern(text)
-    if named and not language.is_empty(language.parse(text, named)):
+    quick = language.quick_intent(text)
+    smart = brain.available() and billing.is_pro(chat_id)
+    if quick and quick["intent"] == "explain" and not smart:
+        explain(chat_id, quick)                      # с нейросетью на вопрос ответит она — подробнее
+        return
+    if named and not language.is_empty(language.parse(text, named)) and not (quick and quick["intent"] == "explain"):
         wish = {"intent": "describe", "pattern": named}       # «FVG на 4ч, свежий» — понятно и без нейросети
-    elif brain.available() and billing.is_pro(chat_id) and brain_allowed(chat_id):
+    elif quick and quick["intent"] != "explain" and quick_reply(chat_id, quick):
+        return
+    elif smart and brain_allowed(chat_id):
         brain_notice(chat_id, None)
-        wish = brain.intent(text, ALL_PATTERNS)
+        wish = brain.intent(language.fix_text(text), ALL_PATTERNS)
     if wish is None:
-        name = language.detect_pattern(text)
-        if name and not language.is_empty(language.parse(text, name)):
-            wish = {"intent": "describe", "pattern": name}
-        else:
-            show_menu(chat_id)
+        if quick and quick_reply(chat_id, quick):    # нейросеть не ответила — объясняем словарём
             return
+        send_message(NOT_UNDERSTOOD, chat_id, menu_keyboard(chat_id))
+        return
     kind = wish.get("intent")
     if kind == "describe":
-        describe_pattern(chat_id, wish.get("pattern") or language.detect_pattern(text), text)
+        describe_pattern(chat_id, wish.get("pattern") or named, text)
     elif kind == "question":
         reply = brain.answer(text)
         if reply:
             send_message("🧠 " + reply, chat_id, {"inline_keyboard": [[TO_MENU]]})
-        else:
+        elif not (quick and quick_reply(chat_id, quick)):
             show_menu(chat_id)
     elif kind == "scan":
         start_job(chat_id, run_scan)
@@ -1240,6 +1313,8 @@ def free_text(chat_id, text):
         find_coin(chat_id, wish["coin"].replace(" ", ""))
     elif kind == "learning":
         show_view(chat_id, None, learning_view(chat_id))
+    elif quick and quick_reply(chat_id, quick):
+        pass
     else:
         show_menu(chat_id)
 
@@ -1484,6 +1559,12 @@ def handle_message(message):
             background(receive_description, chat_id, describing.pop(chat_id), text)
             return
         if text.startswith("/"):
+            # несколько команд в одном сообщении (каждая с новой строки) — выполняем все
+            commands = [line.strip() for line in text.splitlines() if line.strip().startswith("/")]
+            if len(commands) > 1 and billing.is_admin(chat_id):
+                for line in commands:
+                    handle_command(chat_id, line)
+                return
             if not handle_command(chat_id, text):
                 show_menu(chat_id)
             return

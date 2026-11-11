@@ -59,3 +59,25 @@ def test_trader_phrases():
 def test_every_pattern_has_phrases():
     from catalog import ALL_PATTERNS
     assert {p[0] for p in PHRASES} == set(ALL_PATTERNS)
+
+
+def test_typos_layout_and_slang_are_understood():
+    """Опечатки, английская раскладка и сленг: бот понимает так же, как чистый текст (typo_exam.py)."""
+    clean = language.parse("свежий фвг после сильного импульса с объёмом, желательно в дисконте", "FVG")
+    dirty = language.parse("свжеий фвг после сильнго импулса с обьемом, желатльно в диконте", "FVG")
+    for key in ("require", "prefer", "forbid"):
+        assert sorted(clean[key]) == sorted(dirty[key]), key
+    assert language.detect_pattern("adu") == "FVG" and language.detect_pattern("jhlth ,kjr") == "Order Block"
+    assert language.detect_pattern("триугольник") == "Треугольник" and language.detect_pattern("дабл топ") == "Двойная вершина"
+    for word in ("канат", "тренер", "объект", "проблема", "готов"):       # обычные слова не «исправляем»
+        assert language.fix_word(word) == word
+
+
+def test_simple_requests_are_understood_without_the_model():
+    cases = {"просканируй рынок": "scan", "покажи биткоин": "coin", "что такое фвг": "explain",
+             "сколько стоит подписка": "subscribe", "чему ты научился": "learning", "crfy": "scan",
+             "как пользоваться": "help", "ордер блок": "pattern"}
+    for text, intent in cases.items():
+        assert (language.quick_intent(text) or {}).get("intent") == intent, text
+    assert language.quick_intent("покажи биткоин")["coin"] == "BTC"
+    assert language.quick_intent("бычий фвг на 4ч свежий") is None      # это описание, а не просьба

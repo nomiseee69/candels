@@ -258,6 +258,13 @@ def item_from_zone(name, df, zone):
         above, below = float(np.mean(closes_after > mid)), float(np.mean(closes_after < mid))
         if abs(above - below) >= 0.3:
             side = "bullish" if above > below else "bearish"
+        if BLOCK[name] == "breaker":
+            # брейкер — блок, который ПРОБИЛИ: сначала цена ушла от него в одну сторону, потом вернулась и
+            # закрылась с другой. Его сторона — та, где цена оказалась ПОСЛЕ пробоя: смотрим последнее
+            # закрытие за пределами зоны (на длинном скрине «где цена была дольше» — это ещё время до пробоя)
+            outside = np.flatnonzero((closes_after > top) | (closes_after < bottom))
+            if len(outside):                           # последнее закрытие ЗА зоной — по какую оно сторону
+                side = "bullish" if closes_after[outside[-1]] > top else "bearish"
     size = float(np.nanmean(atr(df).to_numpy())) or 1.0
     if family == "fvg":
         # три свечи FVG: зону обычно рисуют от 1-й или 2-й свечи — ищем рядом тройку, чья «дыра»

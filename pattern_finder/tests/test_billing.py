@@ -378,6 +378,14 @@ def test_admin_grants_pro_forever(tmp_path, monkeypatch):
         assert any(b["callback_data"] == "adm:grant:5:forever" for row in card[1]["inline_keyboard"] for b in row)
         bot.handle_message({"chat": {"id": 1}, "from": {"id": 1}, "text": "/revoke @hrmxxx"})
         assert not billing.is_pro(7)
+        # несколько команд одним сообщением и несколько людей в одной команде
+        for uid in (5, 6):
+            billing.revoke(uid)
+        bot.handle_message({"chat": {"id": 1}, "from": {"id": 1},
+                            "text": "/grant @makson1323 навсегда\n/grant @ddd_mmmmm0 навсегда"})
+        bot.handle_message({"chat": {"id": 1}, "from": {"id": 1}, "text": "/grant @hrmxxx, @nobody навсегда"})
+        assert all(billing.status(uid).get("forever") for uid in (5, 6, 7))
+        assert "Не нашёл: @nobody" in rec.sent[-1][0]
     finally:
         rec.restore()
         storage.FILE = original

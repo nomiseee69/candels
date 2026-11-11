@@ -98,12 +98,27 @@ def _sane(candles):
 
 def test_real_tradingview_full_window_light():
     """Настоящий скрин окна TradingView: подписи сверху, шкала цены, ярлыки, табличка.
-    Раньше подписи и ярлыки читались как сотни свечей на всю высоту."""
-    for name, low, high in (("real_tv_light_full.png", 220, 380), ("real_tv_light_table.png", 280, 470),
-                            ("real_tv_dark_labels.png", 420, 680)):
+    Раньше подписи и ярлыки читались как сотни свечей на всю высоту, а плотные свечи слипались.
+    Настоящее число свечей посчитано по шкале времени: 1H за 9 дней ≈ 220, 1D за 5 месяцев ≈ 153."""
+    for name, low, high in (("real_tv_light_full.png", 200, 240), ("real_tv_light_table.png", 143, 165),
+                            ("real_tv_dark_labels.png", 300, 680)):
         candles = vision.extract_candles(os.path.join(HERE, name))
         assert candles is not None and low <= len(candles) <= high, (name, None if candles is None else len(candles))
         assert _sane(candles), name
+
+
+def test_real_screenshot_keeps_the_shape_of_the_chart():
+    """Дневной график BTC: полгода внизу, резкий рост, потом наверху. Таблица индикатора в углу,
+    ярлык цены и пунктир последней цены не должны попасть в свечи, а свечи роста — потеряться."""
+    candles = vision.extract_candles(os.path.join(HERE, "real_tv_light_table.png"))
+    middle = ((candles["high"] + candles["low"]) / 2).to_numpy()
+    span = candles["high"].max() - candles["low"].min()
+    n = len(middle)
+    assert middle[int(0.6 * n):].mean() - middle[:int(0.4 * n)].mean() > 0.3 * span     # справа цена выше
+    steps = abs(middle[1:] - middle[:-1])
+    assert (steps > 0.25 * span).sum() == 0            # нет «прыжков» на таблицу и обратно
+    last = candles.tail(8)
+    assert (last["high"] - last["low"]).max() > 3      # в конце настоящие свечи, а не точки пунктира
 
 
 def test_zone_side_next_to_candles_is_not_a_wick():

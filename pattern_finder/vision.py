@@ -478,28 +478,159 @@ def _runs(rows):
     return [(int(rows[s]), int(rows[e])) for s, e in zip(starts, ends)]
 
 
-def _columns(mask, hsv, h, zone=CANDLE_ZONE):
-    """По каждому столбцу картинки: верх и низ свечи, цвет (+1 зелёный, −1 красный, 0 — не понять)
-    и высота столбика объёма (0 — нет)."""
+def _two_means(points, min_gap=70.0):
+    """Два главных цвета набора точек (BGR): (цвет 1, цвет 2) или None, если цвет по сути один.
+    Без случайности: первый центр — типичный цвет, второй — типичный среди самых непохожих."""
+    pts = np.asarray(points, dtype=float)
+    if len(pts) < 8:
+        return None
+    a = np.median(pts, axis=0)
+    far = np.abs(pts - a).sum(axis=1)
+    b = np.median(pts[far >= np.quantile(far, 0.8)], axis=0)
+    for _ in range(6):
+        to_a = np.abs(pts - a).sum(axis=1) <= np.abs(pts - b).sum(axis=1)
+        if to_a.all() or not to_a.any():
+            return None
+        a, b = np.median(pts[to_a], axis=0), np.median(pts[~to_a], axis=0)
+    share = min(to_a.mean(), 1 - to_a.mean())
+    if np.abs(a - b).sum() < min_gap or share < 0.08:
+        return None
+    return a, b
+
+
+def _ink_direction(img, background):
+    """Куда цвет пикселя «уходит» от фона: (единичный вектор, сила). У бледных пикселей (тонкая свеча,
+    сглаженный край, сжатый скрин) цвет — смесь краски с фоном: яркость и насыщенность другие,
+    а НАПРАВЛЕНИЕ от фона то же, что у чистой краски."""
+    diff = img.astype(float) - np.asarray(background, dtype=float)
+    norm = np.linalg.norm(diff, axis=2)
+    return diff / np.maximum(norm, 1.0)[..., None], norm
+
+
+def chroma_mask(img, background):
+    """255 там, где пиксель ЦВЕТНОЙ (не серый / белый / чёрный) — даже если он бледный."""
+    unit, norm = _ink_direction(img, background)
+    gray = np.abs(unit.sum(axis=2)) / np.sqrt(3)          # косинус угла с «серой» осью
+    return np.where((gray < 0.975) & (norm > 35), 255, 0).astype(np.uint8)
+
+
+FOREIGN = 2                  # пиксель цветной, но не цвета свечей (синяя подпись, фиолетовая рамка…)
+
+
+def _strokes(mask):
+    """«Свечные» пиксели: вертикальные штрихи, которые не входят в широкие сплошные пятна
+    (плашки, таблицы, толстые линии). По ним узнаём цвета свечей — текст и рисунки не мешают."""
+    tall = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((9, 1), np.uint8))
+    wide = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((1, max(25, int(0.03 * mask.shape[1]))), np.uint8))
+    return cv2.bitwise_and(tall, cv2.bitwise_not(wide))
+
+
+def ink_classes(img, mask):
+    """Карта «какого из двух цветов свечей пиксель»: +1 / −1, 0 — непонятно или цвет один,
+    FOREIGN — цветной пиксель НЕ цвета свечей (подпись, значок, остаток рисунка).
+    Цвета свечей у всех свои (зелёный / красный, синий / красный, белый / серый…) — поэтому
+    не ищем «зелёный», а берём два главных цвета самих свечей на ЭТОМ скрине."""
+    on = mask > 0
+    classes = np.zeros(mask.shape, np.int8)
+    if on.sum() < 50:
+        return classes
+    sample = lambda points: points[::max(1, len(points) // 20000)]
+    # 1) обычный случай — два разных цвета (зелёный / красный, синий / красный…): сравниваем
+    #    «направление от фона», оно одно и то же у яркой свечи и у её бледных краёв
+    unit, norm = _ink_direction(img, detect_background(img))
+    strong = on & (norm > 35)
+    strokes = strong & (_strokes(mask) > 0)
+    source = strokes if strokes.sum() >= 200 else strong
+    centers = _two_means(sample(unit[source] * 255.0), 90.0) if source.sum() >= 50 else None
+    if centers is not None:
+        a, b = centers
+        da = np.abs(unit * 255.0 - a).sum(axis=2)
+        db = np.abs(unit * 255.0 - b).sum(axis=2)
+        classes[strong & (da < 0.7 * db)] = 1
+        classes[strong & (db < 0.7 * da)] = -1
+        # третий цвет: далеко от обоих цветов свечей — и при этом сам цветной (не серый)
+        gray = np.abs(unit.sum(axis=2)) / np.sqrt(3)
+        spread = np.abs(a - b).sum()
+        classes[strong & (np.minimum(da, db) > max(110.0, 0.6 * spread)) & (gray < 0.975)] = FOREIGN
+        return classes
+    # 2) свечи отличаются только яркостью (белые / серые): цвета берём по «серединам» тел —
+    #    у краёв и тонких теней цвет смешан с фоном и похож на второй цвет
+    core = cv2.erode(mask, np.ones((3, 3), np.uint8)) > 0
+    centers = _two_means(sample(img[core].astype(float))) if core.sum() >= 200 else None
+    if centers is None:
+        return classes
+    a, b = centers
+    da = np.abs(img.astype(float) - a).sum(axis=2)
+    db = np.abs(img.astype(float) - b).sum(axis=2)
+    classes[on & (da < 0.7 * db)] = 1
+    classes[on & (db < 0.7 * da)] = -1
+    return classes
+
+
+def fill_hollow(mask, max_width=None):
+    """Пустые («hollow») и белые с контуром свечи: тело — только рамка, внутри фон. Закрашиваем
+    такие «дырки» (небольшие прямоугольные области фона, со всех сторон окружённые свечой) —
+    дальше свеча читается как обычная."""
+    h, w = mask.shape
+    max_width = max_width or max(40, int(0.07 * w))
+    # рамку тела может «перерезать» линия сетки или стёртая линия уровня — второй раз ищем дырки,
+    # склеив разрывы по вертикали (низкие тела при этом слипаются целиком, поэтому нужны оба прохода)
+    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 1), np.uint8))
+    filled = mask.copy()
+    for source in (mask, closed):
+        empty = (source == 0).astype(np.uint8)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(empty, connectivity=4)
+        for i in range(1, count):
+            x, y, bw, bh, area = stats[i]
+            if x == 0 or y == 0 or x + bw >= w or y + bh >= h:
+                continue                                # касается края картинки — это фон, а не дырка
+            if bw > max_width or area < 0.75 * bw * bh:
+                continue                                # большая или неровная — не тело свечи
+            filled[y:y + bh, x:x + bw][labels[y:y + bh, x:x + bw] == i] = 255
+    return filled
+
+
+def _volume_base(mask, h):
+    """Строка-основание, на которой стоят столбики объёма, или None, если объёма нет.
+    Объём бывает не у самого низа картинки (под ним шкала времени, кнопки) — ищем не «нижнюю
+    четверть», а общую линию, на которую опирается большинство нижних штрихов."""
+    w = mask.shape[1]
+    bottoms = []
+    for x in range(w):
+        runs = _runs(np.where(mask[:, x] > 0)[0])
+        low = [r for r in runs if r[0] >= 0.45 * h]
+        if low:
+            bottoms.append(low[-1][1])
+    if len(bottoms) < 0.08 * w:
+        return None
+    base = int(np.argmax(np.bincount(bottoms)))
+    same = sum(1 for v in bottoms if abs(v - base) <= 1)
+    return base if same >= 0.6 * len(bottoms) and same >= 0.08 * w else None
+
+
+def _columns(mask, classes, h, zone=CANDLE_ZONE, base=None):
+    """По каждому столбцу картинки: верх и низ свечи, цвет (+1 / −1 — один из двух цветов свечей,
+    0 — не понять) и высота столбика объёма (0 — нет). base — строка-основание объёма:
+    штрих, который на ней стоит, — столбик объёма, а не свеча."""
     cols = []
     for x in range(mask.shape[1]):
         runs = _runs(np.where(mask[:, x] > 0)[0])
-        candle = [r for r in runs if r[0] < zone * h]
-        volume = [r for r in runs if r[0] >= VOLUME_ZONE * h and r[1] >= 0.9 * h]
+        if base is not None:
+            volume = [r for r in runs if abs(r[1] - base) <= 2 and r[0] >= 0.45 * h]
+            candle = [r for r in runs if r not in volume and r[0] < base]
+        else:
+            candle = [r for r in runs if r[0] < zone * h]
+            volume = [r for r in runs if r[0] >= VOLUME_ZONE * h and r[1] >= 0.9 * h]
         if not candle:
             cols.append(None)
             continue
         top, bottom = max(candle, key=lambda r: r[1] - r[0])      # самая длинная группа — свеча, не значок
-        inside = mask[top:bottom + 1, x] > 0
-        hues = hsv[top:bottom + 1, x, 0][inside]
-        sats = hsv[top:bottom + 1, x, 1][inside]
-        green = np.mean((hues >= GREEN_HUE[0]) & (hues <= GREEN_HUE[1])) if len(hues) else 0.5
-        color = 1 if green > 0.6 else -1 if green < 0.4 else 0
-        if len(sats) and np.mean(sats) < SATURATION_MIN:
-            color = 0                                        # чёрно-белые свечи: цвета нет
-        
+        inks = classes[top:bottom + 1, x]
+        first, second = int((inks == 1).sum()), int((inks == -1).sum())
+        known = first + second
+        color = 0 if known == 0 else 1 if first > 0.6 * known else -1 if second > 0.6 * known else 0
         vol = max((r[1] - r[0] + 1 for r in volume if r[0] > bottom + RUN_GAP), default=0)
-        cols.append((top, bottom, color, vol))
+        cols.append((top, bottom, color, vol, candle))
     return cols
 
 
@@ -514,30 +645,68 @@ def _rectangle(cols, group):
 
 
 def _groups(cols):
-    """Соседние столбцы одного цвета без пропуска — одна свеча. Слишком широкие группы
-    (свечи вплотную) делим по типичной ширине свечи."""
-    groups, current = [], []
+    """Соседние столбцы без пропуска — «кучка»; внутри кучки свечи РАЗНОГО цвета, стоящие вплотную,
+    разделяем по смене цвета. Слишком широкие группы (свечи одного цвета вплотную) делим по шагу."""
+    blobs, current = [], []
     for x, c in enumerate(cols):
-        if c is None or (current and cols[current[-1]][2] != c[2]):
+        if c is None:
             if current:
-                groups.append(current)
-            current = [x] if c is not None else []
+                blobs.append(current)
+            current = []
         else:
             current.append(x)
     if current:
-        groups.append(current)
-    if not groups:
+        blobs.append(current)
+    if not blobs:
         return []
+    # типичная ширина свечи — по отрезкам одного цвета (на плотном графике «кучка» — это много свечей).
+    # Столбец «цвет не понять» внутри свечи (тень, сглаживание) цвет не меняет.
+    runs = []
+    for blob in blobs:
+        length, color = 0, 0
+        for x in blob:
+            c = cols[x][2]
+            if c != 0 and color != 0 and c != color:
+                runs.append(length)
+                length = 0
+            length += 1
+            color = c or color
+        runs.append(length)
+    # «типичная» — та, в отрезки которой попадает половина всех столбцов: обрывков в 1–2 столбца
+    # много по числу, но мало по площади
+    runs = np.sort(np.array(runs))
+    width = max(1, int(runs[np.searchsorted(np.cumsum(runs), 0.5 * runs.sum())]))
+    weak = max(1, int(round(0.34 * width)))           # обрывок: край тела, сглаживание, «мигание» цвета
+    groups = []
+    for blob in blobs:
+        parts = [[cols[blob[0]][2], [blob[0]]]]         # [цвет, столбцы]
+        for x in blob[1:]:
+            if cols[x][2] == parts[-1][0]:
+                parts[-1][1].append(x)
+            else:
+                parts.append([cols[x][2], [x]])
+        # обрывки и столбцы «цвет не понять» — часть соседней свечи, а не отдельная свеча
+        while len(parts) > 1:
+            sizes = [len(p[1]) if p[0] != 0 else 0 for p in parts]
+            i = int(np.argmin(sizes))
+            if sizes[i] >= weak:
+                break
+            left = len(parts[i - 1][1]) if i > 0 else -1
+            right = len(parts[i + 1][1]) if i + 1 < len(parts) else -1
+            if left >= right:
+                parts[i - 1][1] += parts[i][1]
+            else:
+                parts[i + 1][1] = parts[i][1] + parts[i + 1][1]
+            del parts[i]
+            merged = [parts[0]]
+            for part in parts[1:]:                     # после слияния соседи одного цвета — одна группа
+                if part[0] == merged[-1][0]:
+                    merged[-1][1] += part[1]
+                else:
+                    merged.append(part)
+            parts = merged
+        groups += [part[1] for part in parts]
     width = max(1, int(np.median([len(g) for g in groups])))
-    # обрывки в 1–2 столбца вплотную к соседу — та же свеча (цвет «мигает» под полупрозрачной
-    # заливкой или на краю тела), а не отдельные свечи
-    merged = []
-    for g in groups:
-        if merged and g[0] == merged[-1][-1] + 1 and min(len(g), len(merged[-1])) < 0.5 * width:
-            merged[-1] = merged[-1] + g
-        else:
-            merged.append(g)
-    groups = merged
     # шаг между свечами — по одиночным свечам (у них центр точно на месте). На плотном графике
     # соседние свечи одного цвета сливаются в одну группу — делим её по ШАГУ, а не по ширине тела
     singles = [float(np.mean(g)) for g in groups if len(g) <= 1.5 * width]
@@ -622,24 +791,361 @@ def _poc_row(mask, box):
     return best[0] if best else None
 
 
-def _wick(full, x_range, top, bottom, gap=2):
+def _wick(full, center, top, bottom, width=3, gap=2):
     """Тонкие тени (фитили) часто бледные — по цвету их не видно. Достраиваем вверх и вниз
-    по всем непустым пикселям центральных столбцов свечи."""
+    по всем непустым пикселям центральных столбцов свечи. Тень — тонкая вертикаль: строка, где
+    «не фон» идёт сплошь шире самой свечи, — это уже подпись или линия поверх графика, а не тень."""
     if full is None:
         return top, bottom
-    h = full.shape[0]
-    column = full[:, x_range].max(axis=1) > 0
+    h, w = full.shape
+    x0, x1 = max(0, center - 1), min(w, center + 2)
+    column = full[:, x0:x1].max(axis=1) > 0
+    reach = int(max(4, width))
+    lo, hi = max(0, center - reach), min(w, center + reach + 1)
+
+    def thin(y):
+        return column[y] and not full[y, lo:hi].all()
+
     y, miss = top - 1, 0
     while y >= 0 and miss <= gap:
-        miss = 0 if column[y] else miss + 1
+        miss = 0 if thin(y) else miss + 1
         y -= 1
     new_top = y + 1 + miss
     y, miss = bottom + 1, 0
     while y < h and miss <= gap:
-        miss = 0 if column[y] else miss + 1
+        miss = 0 if thin(y) else miss + 1
         y += 1
     new_bottom = y - 1 - miss
     return min(top, new_top), max(bottom, new_bottom)
+
+
+def _lattice(xs):
+    """Свечи стоят с ОДНИМ шагом: x = начало + шаг · номер. Возвращает (шаг, начало, отклонение каждой
+    точки от «решётки» в долях шага) или (None, None, None), если ровного шага не видно."""
+    xs = np.asarray(xs, dtype=float)
+    if len(xs) < 12:
+        return None, None, None
+    gaps = np.diff(xs)
+    gaps = gaps[gaps > 0]
+    if len(gaps) < 8:
+        return None, None, None
+    step = float(np.median(gaps))
+    for span in (4, 12, 36, 108):                    # уточняем шаг на всё более длинных отрезках
+        if len(xs) <= span + 5:
+            break
+        far = xs[span:] - xs[:-span]
+        k = np.round(far / step)
+        ok = (k > 0) & (np.abs(far / step - k) < 0.3)
+        if ok.sum() < 5:
+            break
+        step = float(np.median(far[ok] / k[ok]))
+    if step < 1.5:
+        return None, None, None
+    origin = float(xs[len(xs) // 2])
+    for _ in range(3):                               # точная прямая «номер → x» по точкам на решётке
+        k = np.round((xs - origin) / step)
+        off = (xs - origin) / step - k
+        good = np.abs(off - np.median(off)) <= 0.25
+        if good.sum() < 8 or len(set(k[good])) < 4:
+            break
+        step, origin = (float(v) for v in np.polyfit(k[good], xs[good], 1))
+    off = (xs - origin) / step
+    return step, origin, off - np.round(off)
+
+
+LATTICE_FIT = 0.3            # «на решётке» — не дальше 30% шага от своего места
+COMB_SIZE = 1 << 16
+
+
+def _candle_starts(cols):
+    """Левые края свечей: столбец после пустого или смена цвета внутри «кучки» (свечи вплотную)."""
+    starts, color, inside = [], 0, False
+    for x, c in enumerate(cols):
+        if c is None:
+            inside, color = False, 0
+            continue
+        if not inside or (c[2] != 0 and color != 0 and c[2] != color):
+            starts.append(x)
+        inside = True
+        color = c[2] or color
+    return np.array(starts, dtype=float)
+
+
+def _step_starts(cols, lo, hi):
+    """Левые края свечей, стоящих вплотную: столбцы, где верх или низ тела меняется скачком.
+    Тени (в один столбец) сглаживаем — они не граница свечи."""
+    xs = [x for x in range(lo, hi + 1) if cols[x] is not None]
+    if len(xs) < 12:
+        return np.array([])
+    tops = np.array([cols[x][0] for x in xs], dtype=float)
+    bottoms = np.array([cols[x][1] for x in xs], dtype=float)
+    smooth = lambda v: np.median(np.stack([np.r_[v[0], v[:-1]], v, np.r_[v[1:], v[-1]]]), axis=0)
+    tops, bottoms = smooth(tops), smooth(bottoms)
+    starts = [xs[0]]
+    for i in range(1, len(xs)):
+        if xs[i] != xs[i - 1] + 1 or abs(tops[i] - tops[i - 1]) >= 2 or abs(bottoms[i] - bottoms[i - 1]) >= 2:
+            starts.append(xs[i])
+    return np.array(starts, dtype=float)
+
+
+def _comb(starts):
+    """Шаг свечей по их левым краям: края стоят «гребёнкой» x = начало + шаг · номер.
+    Ищем период, на котором края совпадают по фазе (спектр), и уточняем прямой.
+    Возвращает (шаг, начало, доля краёв на гребёнке) или (None, None, 0)."""
+    if len(starts) < 12:
+        return None, None, 0.0
+    span = float(starts[-1] - starts[0])
+    signal = np.zeros(int(starts[-1]) + 2)
+    signal[starts.astype(int)] = 1.0
+    signal -= signal.mean()
+    power = np.abs(np.fft.rfft(signal, COMB_SIZE))
+    freq = np.arange(len(power)) / COMB_SIZE
+    band = (freq >= max(1 / 80, 6 / max(span, 1))) & (freq <= 0.5)
+    if not band.any():
+        return None, None, 0.0
+    base = 1.0 / freq[int(np.argmax(np.where(band, power, 0)))]
+
+    def fit(step):
+        """Гребёнка с таким шагом: (шаг, начало, доля краёв, попавших на свои места)."""
+        phase = np.angle(np.mean(np.exp(2j * np.pi * starts / step))) / (2 * np.pi)
+        origin = phase * step
+        for _ in range(3):
+            k = np.round((starts - origin) / step)
+            off = (starts - origin) / step - k
+            good = np.abs(off) <= 0.25
+            if good.sum() < 8 or len(set(k[good])) < 4:
+                break
+            step, origin = (float(v) for v in np.polyfit(k[good], starts[good], 1))
+        off = (starts - origin) / step
+        off -= np.round(off)
+        near = max(1.2, 0.12 * step)                    # «на месте» — в пределах пикселя-двух
+        share = float(np.mean(np.abs(off) * step <= near))
+        # при мелком шаге (4–5 пикселей) «в пределах пикселя» попадает половина любых точек — доля
+        # ничего не доказывает. Тогда смотрим, насколько дружно края стоят в одной фазе: у случайных
+        # точек дружность около нуля, у настоящей гребёнки с дрожанием в пиксель — заметно выше
+        together = float(np.abs(np.mean(np.exp(2j * np.pi * (starts - origin) / step))))
+        if together >= 0.25 and len(starts) * together ** 2 >= 16:      # случайно так не совпадёт
+            share = max(share, 0.75 + 0.25 * together)
+        return step, origin, share
+
+    # спектр мог показать гармонику — шаг в 2–6 раз меньше настоящего (на мелкий шаг «попадает»
+    # что угодно). Настоящий шаг — самый крупный, при котором края всё ещё стоят на своих местах
+    best = fit(base)
+    for times in (2, 3, 4, 5, 6):
+        if base * times > 80:
+            break
+        option = fit(base * times)
+        if option[2] >= 0.85 and option[2] >= best[2] - 0.08:
+            best = option
+    return best
+
+
+def _resegment(cols, groups, raw=None):
+    """Второй проход по свечам — уже зная шаг. Каждая свеча стоит на своём месте решётки, поэтому:
+      • слипшиеся свечи (плотный график, один цвет) делятся ровно по местам;
+      • значки, цифры шкалы и подписи, которые в решётку не попадают, отбрасываются;
+      • текст, прилипший к свече сбоку, не сдвигает её;
+      • пропущенное место (доджи без теней, стёртый вместе с пунктиром) восстанавливается.
+    Шаг виден неуверенно — возвращаем группы как есть."""
+    if not groups or (len(groups) < 12 and sum(len(g) for g in groups) < 60):
+        return groups
+    lo, hi = groups[0][0], groups[-1][-1]             # края первого прохода: подписи шкалы уже отрезаны
+    starts = _candle_starts(cols)
+    starts = starts[(starts >= lo) & (starts <= hi)]
+    step = None
+    if len(starts) >= 12:
+        # тонкая свеча (доджи: одна тень без тела) стоит ПО ЦЕНТРУ своего места, а не у левого края —
+        # для поиска шага сдвигаем её край туда, где он был бы у свечи с телом
+        edges = set(starts.astype(int).tolist())
+        widths = []
+        for x in starts.astype(int):
+            end = x
+            while end + 1 < len(cols) and cols[end + 1] is not None and end + 1 not in edges and end - x < 80:
+                end += 1
+            widths.append(end - x + 1)
+        widths = np.array(widths, dtype=float)
+        order = np.sort(widths)
+        usual = float(order[np.searchsorted(np.cumsum(order), 0.5 * order.sum())])
+        # ширина одной свечи — самая маленькая из частых (две свечи одного цвета вплотную дают вдвое больше)
+        single = usual
+        for value in np.unique(widths[widths >= 2]):
+            if np.sum(np.abs(widths - value) <= 1) >= 0.15 * len(widths):
+                single = min(usual, float(value))
+                break
+        thin = widths <= 0.5 * single
+        aligned = np.sort(np.where(thin, starts - (single - widths) / 2, starts))
+        step, origin, share = _comb(aligned)
+        if step is None or step < max(2.0, 0.8 * single) or share < 0.75:
+            step = None
+    if step is not None:
+        # ширина тела: типичная длина отрезка от левого края свечи до пустого столбца / смены цвета
+        lengths = []
+        for x in starts.astype(int):
+            end = x
+            while end + 1 < len(cols) and cols[end + 1] is not None and end + 1 not in starts and end - x < step:
+                end += 1
+            lengths.append(end - x + 1)
+        lengths = np.array(lengths)
+        body = int(np.clip(round(float(np.median(lengths[lengths <= 1.3 * step]))), 1, max(1, np.floor(step))))
+    else:
+        # свечи одного цвета стоят вплотную (плотный чёрно-белый график): пустых столбцов и смены цвета
+        # между ними нет. Границы свечей видны по «ступенькам» — верх или низ тела меняется скачком
+        filled = [x for x in range(lo, hi + 1) if cols[x] is not None]
+        long_runs = sum(b - a + 1 for a, b in _runs(np.array(filled)) if b - a + 1 > 40)
+        plain = np.mean([cols[x][2] == 0 for x in filled]) > 0.8
+        if long_runs < 0.5 * len(filled) or not plain:
+            return groups                               # свечи стоят раздельно или цветные — оставляем
+        step, origin, share = _comb(_step_starts(cols, lo, hi))
+        if step is None or not 2 <= step <= 12 or share < 0.6:
+            # шаг не виден — режем ровно: форма графика от этого не меняется, а она и нужна
+            step, origin = 4.0, float(lo)
+        body = max(1, int(np.floor(step)))
+    left = lambda k: origin + step * k
+    place = lambda x: int(np.round((x - origin) / step))
+
+    def fits(g):
+        """Группа — свеча или несколько слипшихся свечей: её столбцы лежат на местах решётки."""
+        inside = sum(1 for x in g if -1.5 <= x - left(place(x - (body - 1) / 2)) <= body + 0.5)
+        return inside >= 0.8 * len(g)
+
+    real = [g for g in groups if fits(g)]
+    if len(real) < min(12, len(groups)):
+        return groups
+    first, last = place(real[0][0]), place(real[-1][-1] - (body - 1))
+    result = []
+    for k in range(first, last + 1):
+        x0 = int(np.floor(left(k) + 0.5))
+        picked = [x for x in range(max(0, x0), min(len(cols), x0 + body)) if cols[x] is not None]
+        if not picked and raw is not None:
+            picked = _rescue(cols, raw, x0 + body // 2, result)
+        if picked:
+            result.append(picked)
+    return result
+
+
+def _rescue(cols, raw, x, before):
+    """Место решётки пустое: крошечная свеча (доджи) могла стереться вместе с пунктиром. Смотрим
+    в нестёртую маску: есть ли в этом столбце штрих рядом по высоте с предыдущей свечой."""
+    if not before or not 0 <= x < raw.shape[1]:
+        return []
+    prev = [cols[c] for c in before[-1] if cols[c] is not None]
+    top, bottom = min(p[0] for p in prev), max(p[1] for p in prev)
+    reach = max(6, bottom - top)
+    rows = np.flatnonzero(raw[max(0, top - reach):bottom + reach + 1, max(0, x - 1):x + 2].max(axis=1))
+    if len(rows) == 0:
+        return []
+    runs = _runs(rows + max(0, top - reach))
+    near = min(runs, key=lambda r: abs((r[0] + r[1]) / 2 - (top + bottom) / 2))
+    if near[1] - near[0] > reach:
+        return []                                      # длинный штрих — не доджи
+    cols[x] = (near[0], near[1], 0, 0, [near])
+    return [x]
+
+
+def _body_ink(img, r, h):
+    """Цвет тела свечи: типичный цвет пикселей ВНУТРИ тела (у пустой свечи — фон)."""
+    x0, x1 = r["cols"]
+    top, bottom = int(round(h - 1 - r["upper"])), int(round(h - 1 - r["lower"]))
+    if x1 - x0 >= 2:
+        x0, x1 = x0 + 1, x1 - 1
+    if bottom - top >= 2:
+        top, bottom = top + 1, bottom - 1
+    part = img[max(0, top):bottom + 1, x0:x1 + 1].reshape(-1, 3)
+    return np.median(part, axis=0) if len(part) else None
+
+
+def _open_close(r, up):
+    return (r["lower"], r["upper"]) if up else (r["upper"], r["lower"])
+
+
+def _prior_up(ink, other, background):
+    """Какой из двух цветов «вверх», если по самим свечам не понять: зелёный — вверх, красный — вниз;
+    иначе пустая / светлая свеча — вверх (так рисуют чёрно-белые и «hollow» графики)."""
+    def hue_class(color):
+        hsv = cv2.cvtColor(np.uint8([[np.clip(color, 0, 255)]]), cv2.COLOR_BGR2HSV)[0, 0].astype(int)
+        if hsv[1] < SATURATION_MIN:
+            return 0
+        if GREEN_HUE[0] <= hsv[0] <= GREEN_HUE[1]:
+            return 1
+        return -1 if hsv[0] <= 12 or hsv[0] >= 160 else 0
+    a, b = hue_class(ink), hue_class(other)
+    if a != b and (a == 1 or b == -1):
+        return True
+    if a != b and (a == -1 or b == 1):
+        return False
+    near_a, near_b = np.abs(ink - background).sum(), np.abs(other - background).sum()
+    if abs(near_a - near_b) > 60:
+        return near_a < near_b                        # похожа на фон — пустая — растущая
+    return float(np.sum(ink)) > float(np.sum(other))  # светлее — растущая
+
+
+def _directions(rows, img, background, h):
+    """Какая свеча растущая, какая падающая — БЕЗ знания цветов. Главный признак — сам график:
+    следующая свеча открывается там, где закрылась предыдущая. Делим свечи на два цвета и берём
+    то назначение «цвет → вверх / вниз», при котором открытия совпадают с закрытиями."""
+    if not rows:
+        return rows
+    typical = float(np.median([r["high"] - r["low"] for r in rows])) or 1.0
+    inks = [_body_ink(img, r, h) for r in rows]
+    clear = [i for i, r in enumerate(rows)
+             if inks[i] is not None and r["upper"] - r["lower"] >= max(3.0, 0.08 * typical) and r["width"] >= 2]
+    labels = {}
+    centers = _two_means(np.array([inks[i] for i in clear]), 60.0) if len(clear) >= 8 else None
+    if centers is not None:
+        a, b = centers
+        for i in clear:
+            da, db = np.abs(inks[i] - a).sum(), np.abs(inks[i] - b).sum()
+            if da < 0.7 * db:
+                labels[i] = 0
+            elif db < 0.7 * da:
+                labels[i] = 1
+
+        def cost(first_up):
+            total = 0.0
+            for i in range(1, len(rows)):
+                if i in labels and i - 1 in labels:
+                    opened = _open_close(rows[i], (labels[i] == 0) == first_up)[0]
+                    closed = _open_close(rows[i - 1], (labels[i - 1] == 0) == first_up)[1]
+                    total += min(abs(opened - closed), 3 * typical)
+            return total
+        up_cost, down_cost = cost(True), cost(False)
+        prior = _prior_up(a, b, background)
+        if min(up_cost, down_cost) < 0.7 * max(up_cost, down_cost):
+            first_up = up_cost < down_cost
+        else:
+            first_up = prior
+        for i, label in labels.items():
+            rows[i]["color"] = 1 if (label == 0) == first_up else -1
+    known = set(labels)
+    if not known:
+        # цвет один (или свечей мало): направление каждой свечи — по цепочке открытий и закрытий
+        best = [(0.0, [True]), (0.0, [False])]
+        for i in range(1, len(rows)):
+            step = []
+            for up in (True, False):
+                opened = _open_close(rows[i], up)[0]
+                options = [(best[k][0] + abs(opened - _open_close(rows[i - 1], prev)[1]), best[k][1])
+                           for k, prev in enumerate((True, False))]
+                total, path = min(options, key=lambda o: o[0])
+                step.append((total, path + [up]))
+            best = step
+        for r, up in zip(rows, min(best, key=lambda o: o[0])[1]):
+            r["color"] = 1 if up else -1
+        return rows
+    for i, r in enumerate(rows):                       # доджи и тонкие свечи — по соседям
+        if i in known:
+            continue
+        choice = 0.0
+        for up in (True, False):
+            opened, closed = _open_close(r, up)
+            miss = 0.0
+            if i > 0:
+                miss += abs(opened - _open_close(rows[i - 1], rows[i - 1]["color"] > 0)[1])
+            if i + 1 < len(rows) and i + 1 in known:
+                miss += abs(closed - _open_close(rows[i + 1], rows[i + 1]["color"] > 0)[0])
+            choice += miss if up else -miss
+        r["color"] = 1 if choice <= 0 else -1
+    return rows
 
 
 def _drop_strays(rows, window=4, far=6.0):
@@ -697,29 +1203,196 @@ def _same_candle(parts):
     return keep
 
 
+def _row(parts, g, h, full):
+    """Одна свеча из её столбцов: (верх, низ) каждого столбца → high / low и тело."""
+    parts = _same_candle(parts)
+    top = min(p[0] for p in parts)
+    bottom = max(p[1] for p in parts)
+    center = int(round(np.mean(g)))
+    top, bottom = _wick(full, center, top, bottom, len(g))
+    cover = np.zeros(bottom - top + 1)
+    for p in parts:
+        cover[p[0] - top:p[1] - top + 1] += 1
+    if len(g) >= 3:
+        body = np.where(cover >= BODY_SHARE * len(g))[0]
+        body_top, body_bottom = (top + body[0], top + body[-1]) if len(body) else (top, bottom)
+    else:                                             # тонкая свеча: тело не отличить от тени
+        quarter = (bottom - top) / 4
+        body_top, body_bottom = top + quarter, bottom - quarter
+    return {"x": float(np.mean(g)), "width": len(g), "high": float(h - 1 - top), "low": float(h - 1 - bottom),
+            "upper": float(h - 1 - body_top), "lower": float(h - 1 - body_bottom),
+            "color": 0, "volume": float(max(p[3] for p in parts)), "cols": (int(g[0]), int(g[-1]))}
+
+
+def _repick(rows, groups, cols, h, full, window=4, far=6.0):
+    """В столбце свечи может оказаться ещё и текст (подпись сверху, кнопки снизу), и он бывает выше
+    маленькой свечи — тогда «самым длинным штрихом» выбран текст, и свеча улетает далеко от соседей.
+    График непрерывный: для такой свечи берём штрихи РЯДОМ с соседями по высоте."""
+    if len(rows) < 2 * window + 3:
+        return rows
+    sizes = np.array([r["high"] - r["low"] for r in rows])
+    typical = max(float(np.median(sizes)), 1.0)
+    mids = np.array([(r["high"] + r["low"]) / 2 for r in rows])
+    for i, g in enumerate(groups):
+        near = np.r_[mids[max(0, i - window):i], mids[i + 1:i + 1 + window]]
+        center = float(np.median(near))
+        if abs(mids[i] - center) <= far * typical:
+            continue
+        target = h - 1 - center                          # строка картинки, где идут соседние свечи
+        parts = []
+        for x in g:
+            top, bottom, color, vol, runs = cols[x]
+            run = min(runs, key=lambda r: 0 if r[0] <= target <= r[1] else min(abs(r[0] - target), abs(r[1] - target)))
+            miss = 0 if run[0] <= target <= run[1] else min(abs(run[0] - target), abs(run[1] - target))
+            if miss <= 3 * typical and run != (top, bottom):
+                parts.append((run[0], run[1], color, vol, runs))
+        if parts:
+            rows[i] = _row(parts, g, h, full)
+    return rows
+
+
+def _candidates(cols, g, keep=4):
+    """Что в этом месте может быть свечой: наборы штрихов столбцов группы, связные по высоте.
+    Обычно вариант один — сама свеча; если в тех же столбцах есть подпись сверху, кнопка снизу,
+    столбик объёма — вариантов несколько. Возвращает [(верх, низ, части по столбцам, столбцы)]."""
+    items = sorted((r[0], r[1], x) for x in g for r in cols[x][4])
+    clusters = []
+    for top, bottom, x in items:
+        if clusters and top <= clusters[-1][1] + 2:
+            clusters[-1][1] = max(clusters[-1][1], bottom)
+            clusters[-1][2].append((top, bottom, x))
+        else:
+            clusters.append([top, bottom, [(top, bottom, x)]])
+    result = []
+    for top, bottom, members in sorted(clusters, key=lambda c: c[0] - c[1])[:keep]:
+        by_col = {}
+        for t, b, x in members:
+            old = by_col.get(x)
+            by_col[x] = (t, b) if old is None else (min(old[0], t), max(old[1], b))
+        xs = sorted(by_col)
+        parts = [(by_col[x][0], by_col[x][1], cols[x][2], cols[x][3], cols[x][4]) for x in xs]
+        result.append((top, bottom, parts, xs))
+    return result
+
+
+def _chain(cols, groups, h, reach=4):
+    """График — одна непрерывная цепочка: следующая свеча стоит на следующем месте и по цене
+    рядом с предыдущей (открывается там, где та закрылась). В каждом месте из вариантов
+    (свеча / подпись / столбик объёма / значок) выбираем тот, что продолжает цепочку, а места,
+    где продолжения нет (таблички, ярлык цены, обрывки рисунка в стороне), пропускаем.
+    Импульсная свеча цепочку не рвёт: она касается соседней. Возвращает [(части, столбцы)]
+    или None, если цепочки не видно."""
+    n = len(groups)
+    if n < 12:
+        return None
+    options = [_candidates(cols, g) for g in groups]
+    centers = np.array([float(np.mean(g)) for g in groups])
+    step = float(np.median(np.diff(centers))) or 1.0
+    typical = max(float(np.median([o[0][1] - o[0][0] + 1 for o in options if o])), 2.0)
+    limit = max(1.5 * typical, 0.03 * h)             # соседние свечи касаются: зазор между ними мал
+    score, back = [], []
+    for j in range(n):
+        score.append([1.0] * len(options[j]))
+        back.append([None] * len(options[j]))
+        for c, (top, bottom, _, _) in enumerate(options[j]):
+            size = min(1.0, (bottom - top + 1) / typical)
+            for i in range(max(0, j - reach), j):
+                places = (centers[j] - centers[i]) / step
+                if places > reach + 0.5:
+                    continue
+                allowed = limit * (1 + 0.25 * max(0.0, places - 1))
+                for k, (ptop, pbottom, _, _) in enumerate(options[i]):
+                    gap = max(top - pbottom, ptop - bottom, 0)
+                    if gap > allowed:
+                        continue
+                    value = score[i][k] + 1 + 0.1 * size - 0.5 * gap / allowed - 0.02 * (j - i - 1)
+                    if value > score[j][c]:
+                        score[j][c], back[j][c] = value, (i, k)
+    best = max(((score[j][c], j, c) for j in range(n) for c in range(len(options[j]))), default=None)
+    if best is None:
+        return None
+    path, node = [], (best[1], best[2])
+    while node is not None:
+        path.append(node)
+        node = back[node[0]][node[1]]
+    path.reverse()
+    if len(path) < max(12, 0.5 * n):
+        return None
+
+    def broken(a, b):
+        """Между соседями по цепочке пропуск мест или заметный зазор по высоте — у края графика так
+        прицепляются значки панели инструментов и обрывки подписей."""
+        (i, k), (j, c) = a, b
+        gap = max(options[j][c][0] - options[i][k][1], options[i][k][0] - options[j][c][1], 0)
+        return (centers[j] - centers[i]) / step > 1.6 or gap > 0.5 * limit
+
+    edge = min(6, len(path) - 12)
+    cut = [t + 1 for t in range(edge) if broken(path[t], path[t + 1])]
+    if cut:
+        path = path[cut[-1]:]
+    edge = min(6, len(path) - 12)
+    cut = [len(path) - 1 - t for t in range(edge) if broken(path[len(path) - 2 - t], path[len(path) - 1 - t])]
+    if cut:
+        path = path[:cut[-1]]
+    # «хвост» из крошечных чёрточек на одной высоте — пунктир последней цены, а не свечи
+    def dot(node):
+        top, bottom = options[node[0]][node[1]][:2]
+        return bottom - top <= 2
+
+    def level(node):
+        top, bottom = options[node[0]][node[1]][:2]
+        return (top + bottom) / 2
+
+    for side in (-1, 0):
+        count = 0
+        while count < len(path) - 12 and dot(path[side * (count + 1) + (0 if side else count)]) \
+                and abs(level(path[side * (count + 1) + (0 if side else count)]) - level(path[side])) <= 1.5:
+            count += 1
+        if count >= 4:
+            path = path[:-count] if side else path[count:]
+    return [(options[j][c][2], options[j][c][3]) for j, c in path]
+
+
+def _own_columns(parts, xs, cols):
+    """Крайний столбец свечи может принадлежать СОСЕДНЕЙ свече того же цвета, стоящей вплотную:
+    он совсем другой высоты, чем остальные столбцы этой свечи, зато такой же, как столбец за краем.
+    Без этого у маленькой свечи рядом с большой появляется «тень» во всю большую свечу."""
+    if len(xs) < 3:
+        return parts, xs
+    keep = list(range(len(xs)))
+    for edge, inner, outside in ((0, 1, xs[0] - 1), (len(xs) - 1, len(xs) - 2, xs[-1] + 1)):
+        if not 0 <= outside < len(cols) or cols[outside] is None:
+            continue
+        top, bottom = parts[edge][0], parts[edge][1]
+        near_top, near_bottom = parts[inner][0], parts[inner][1]
+        differs = abs(top - near_top) + abs(bottom - near_bottom) > max(6, 0.5 * (near_bottom - near_top + 1))
+        same = any(abs(r[0] - top) <= 2 and abs(r[1] - bottom) <= 2 for r in cols[outside][4])
+        if differs and same:
+            keep.remove(edge)
+    return [parts[i] for i in keep], [xs[i] for i in keep]
+
+
 def _candle_rows(img, mask, h, zone=CANDLE_ZONE, full=None):
-    cols = _columns(mask, cv2.cvtColor(img, cv2.COLOR_BGR2HSV), h, zone)
-    rows = []
-    for g in _groups(cols):
-        parts = _same_candle([cols[x] for x in g])
-        top = min(p[0] for p in parts)
-        bottom = max(p[1] for p in parts)
-        center = int(round(np.mean(g)))
-        top, bottom = _wick(full, slice(max(0, center - 1), center + 2), top, bottom)
-        cover = np.zeros(bottom - top + 1)
-        for p in parts:
-            cover[p[0] - top:p[1] - top + 1] += 1
-        if len(g) >= 3:
-            body = np.where(cover >= BODY_SHARE * len(g))[0]
-            body_top, body_bottom = (top + body[0], top + body[-1]) if len(body) else (top, bottom)
-        else:                                             # тонкая свеча: тело не отличить от тени
-            quarter = (bottom - top) / 4
-            body_top, body_bottom = top + quarter, bottom - quarter
-        color = np.sign(sum(p[2] for p in parts))
-        rows.append({"x": float(np.mean(g)), "width": len(g), "high": float(h - 1 - top), "low": float(h - 1 - bottom),
-                     "upper": float(h - 1 - body_top), "lower": float(h - 1 - body_bottom),
-                     "color": int(color), "volume": float(max(p[3] for p in parts))})
-    return _drop_strays(rows)
+    hollow = PANEL.get("hollow")                       # внутренности пустых свечей (закрашены в _prepare)
+    known = hollow is not None and hollow.shape == mask.shape
+    solid = cv2.bitwise_and(mask, cv2.bitwise_not(hollow)) if known else mask
+    classes = ink_classes(img, solid)
+    foreign = classes == FOREIGN
+    if foreign.any():                                  # цветное, но не цвета свечей — не свечи
+        mask = mask.copy()
+        mask[foreign] = 0
+    cols = _columns(mask, classes, h, zone, None if PANEL["cropped"] else _volume_base(mask, h))
+    groups = _resegment(cols, _groups(cols), PANEL.get("raw") if known else None)
+    chain = _chain(cols, groups, h)
+    if chain is not None:
+        rows = _drop_strays([_row(*_own_columns(parts, xs, cols), h, full) for parts, xs in chain])
+    else:                                              # цепочки не видно — читаем по-старому
+        rows = [_row([cols[x] for x in g], g, h, full) for g in groups]
+        rows = _drop_strays(_repick(rows, groups, cols, h, full))
+    rows = _directions(rows, img, detect_background(img), h)
+    for r in rows:
+        r.pop("cols", None)
+    return rows
 
 
 def _to_frame(rows, h):
@@ -822,6 +1495,13 @@ def erase_boxes(img, boxes, background):
         hue_gap = np.minimum(np.abs(hsv[..., 0] - fill_hue), 180 - np.abs(hsv[..., 0] - fill_hue))
         frame = band & (hue_gap < 12) & (np.abs(part - background).sum(axis=2) > FILL_DIFF)
         clean[y0:y1, x0:x1][near_fill | frame] = background.astype(np.uint8)
+        # свечи ПОД полупрозрачной заливкой видны «сквозь краску»: их цвет смешан с цветом заливки
+        # (зелёная под розовой — серая). Снимаем краску: цвет свечи относительно заливки переносим на фон
+        inner = np.zeros(near_fill.shape, bool)
+        inner[max(0, top - y0):bottom - y0 + 1, max(0, left - x0):right - x0 + 1] = True
+        under = inner & ~(near_fill | frame)
+        restored = np.clip(background.astype(int) + (part - np.asarray(color, dtype=int)), 0, 255)
+        clean[y0:y1, x0:x1][under] = restored[under].astype(np.uint8)
         _erase_outline(clean, img, (left, top, right, bottom), background)
     return clean
 
@@ -1046,8 +1726,48 @@ def _grid_line(img, line):
     return float(np.median(hsv[:, 1])) < 40
 
 
+STEEP_ANGLE = 50             # круче — проверяем, штрих это или «лестница» из свечей
+
+
+def _staircase(img, line):
+    """Крутая «линия» — на самом деле резкий рост / падение из мелких свечей? У нарисованного штриха
+    толщина одна по всей длине и край ровный; у свечей ширина скачет (тень — тело — две свечи рядом),
+    а край идёт ступеньками."""
+    h, w = img.shape[:2]
+    background = detect_background(img)
+    y0, y1 = sorted((int(round(line.y1)), int(round(line.y2))))
+    y0, y1 = max(0, y0), min(h - 1, y1)
+    if y1 - y0 < 12:
+        return False
+    lefts, widths, rows = [], [], []
+    for y in range(y0, y1 + 1):
+        x = line.x1 + (line.x2 - line.x1) * (y - line.y1) / ((line.y2 - line.y1) or 1)
+        lo, hi = int(max(0, x - 25)), int(min(w, x + 26))
+        ink = np.abs(img[y, lo:hi].astype(int) - background).sum(axis=1) > FOREGROUND_DIFF
+        at = int(np.clip(round(x) - lo, 0, len(ink) - 1))
+        near = [k for k in range(max(0, at - 3), min(len(ink), at + 4)) if ink[k]]
+        if not near:
+            continue
+        left = right = min(near, key=lambda k: abs(k - at))
+        while left > 0 and ink[left - 1]:
+            left -= 1
+        while right + 1 < len(ink) and ink[right + 1]:
+            right += 1
+        lefts.append(lo + left)
+        widths.append(right - left + 1)
+        rows.append(y)
+    if len(rows) < 0.6 * (y1 - y0 + 1):
+        return True                                    # половины «линии» нет — это не сплошной штрих
+    slope, start = np.polyfit(rows, lefts, 1)
+    wobble = float(np.mean(np.abs(np.array(lefts) - (slope * np.array(rows) + start))))
+    spread = float(np.percentile(widths, 90) - np.percentile(widths, 10))
+    return wobble > 1.2 or spread > 2.5
+
+
 def _candle_like(img, line):
     """Ряд мелких зелёных и красных свечей тоже похож на прямую — такую «линию» не стираем."""
+    if abs(line.angle) >= STEEP_ANGLE and _staircase(img, line):
+        return True
     n = max(2, int(line.length))
     xs = np.linspace(line.x1, line.x2, n).round().astype(int)
     ys = np.linspace(line.y1, line.y2, n).round().astype(int)
@@ -1185,7 +1905,11 @@ def _prepare(path, with_boxes=False):
             if overlap >= 0.6 * min(a.x2 - a.x1, b.x2 - b.x1) and abs(a.angle - b.angle) < 40 \
                     and abs((a.y1 + a.y2) - (b.y1 + b.y2)) / 2 > 6:
                 lines += [ln for ln in (a, b) if ln not in lines]
-    mask = erase_dotted(erase_lines_by_color(img, fg, lines))
+    raw = erase_lines_by_color(img, fg, lines)
+    solid = fill_hollow(raw)                      # пустые («hollow») свечи: тело — рамка, внутри фон
+    PANEL["hollow"] = cv2.bitwise_and(solid, cv2.bitwise_not(raw))
+    PANEL["raw"] = solid                          # до стирания пунктира: тут ещё видны крошечные доджи
+    mask = erase_dotted(solid)
     PANEL["cropped"] = panel is not None
     PANEL["lines"] = lines
     if with_boxes:
@@ -1193,7 +1917,7 @@ def _prepare(path, with_boxes=False):
     return img, h, w, fg, mask
 
 
-PANEL = {"cropped": False, "lines": []}   # вырезали ли главный график из рамки; нарисованные линии
+PANEL = {"cropped": False, "lines": [], "hollow": None, "raw": None}   # вырезали ли главный график из рамки; нарисованные линии
 
 
 def _has_volume(mask, h):
@@ -1225,8 +1949,23 @@ def _zone(mask=None, h=None):
 
 
 def _colored(img, mask):
-    colored = colored_mask(img) & mask
-    return colored if np.count_nonzero(colored) > 0.5 * np.count_nonzero(mask) else mask
+    """Цветные свечи: берём только цветное (это отсекает серый текст и оси). Внутренности пустых
+    свечей (фон) оставляем — они часть свечи.
+    Цветные свечи или чёрно-белые — решаем по «свечным» пикселям: вертикальным штрихам, которые
+    не входят в широкие сплошные пятна. Текста, шкал и плашек на скрине бывает больше, чем свечей, —
+    по всем пикселям сразу цветной график выглядел бы «серым»."""
+    hollow = PANEL.get("hollow")
+    holes = cv2.bitwise_and(hollow, mask) if hollow is not None and hollow.shape == mask.shape else np.zeros_like(mask)
+    ink = cv2.bitwise_and(mask, cv2.bitwise_not(holes))
+    colored = chroma_mask(img, detect_background(img)) & ink
+    strokes = _strokes(ink)
+    total = np.count_nonzero(strokes)
+    # у чёрно-белых свечей цветных штрихов нет совсем; у цветных их почти половина и больше (остальное — текст)
+    if total >= 50 and np.count_nonzero(colored & strokes) > max(300, 0.3 * total):
+        return cv2.bitwise_or(colored, holes)
+    if np.count_nonzero(colored) > 0.5 * np.count_nonzero(ink):
+        return cv2.bitwise_or(colored, holes)
+    return mask
 
 
 def extract_candles(path):
