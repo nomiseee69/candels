@@ -113,7 +113,7 @@ def caption_block(found):
     bad = [c for c in found if c["weight"] < 0]
     lines = []
     if good:
-        lines.append("Совпадение ТФ:")
+        lines.append("🔗 Совпадение ТФ:")
         lines += [f"• {c['text']}" for c in good]
     lines += [f"{c['text']}" for c in bad]
     return "\n".join(lines)

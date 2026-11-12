@@ -301,7 +301,7 @@ def describe_item(item):
 def alert_caption(symbol, interval, df, items):
     best = max(items, key=lambda it: it["score"])
     names = "\n".join(f"• {describe_item(it)}" for it in items)
-    title = "Комбинация" if len(items) > 1 else "Паттерн"
+    title = "🔥 Комбинация" if len(items) > 1 else "🔔 Паттерн"
     begin = df["open_time"].iloc[best["start"]]
     end = df["open_time"].iloc[min(best["start"] + best["window"] - 1, len(df) - 1)]
     return (
@@ -447,10 +447,11 @@ def coin_caption(coin):
     tfs = ", ".join(f["interval"].upper() for f in frames)
     combo = any(len(f["items"]) > 1 for f in frames)
     linked = confluence_score(coin.get("confluence", [])) > 0
-    lines = [f"{symbol}: находки на {len(frames)} таймфреймах ({tfs})"]
+    icon = "🔗" if linked else "🔥" if combo else "🔔"
+    lines = [f"{icon} {symbol}: находки на {len(frames)} таймфреймах ({tfs})"]
     for f in frames:
-        mark = " — комбинация" if len(f["items"]) > 1 else ""
-        lines.append(f"\n{f['interval'].upper()}{mark}")
+        mark = "  🔥 комбинация" if len(f["items"]) > 1 else ""
+        lines.append(f"\n⏱ {f['interval'].upper()}{mark}")
         lines += [f"• {describe_item(it)}" for it in f["items"]]
     if block:
         lines.append(f"\n{block}")

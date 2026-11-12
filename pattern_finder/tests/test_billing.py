@@ -282,7 +282,7 @@ def test_paid_user_really_gets_pro(tmp_path, monkeypatch):
             **invoice, "telegram_payment_charge_id": "real1", "subscription_expiration_date": int(now + 30 * DAY)}})
         assert billing.is_pro(5) and len(bot.search_patterns(5)) == 3
         text, _ = bot.profile_view(5)
-        assert "Pro" in text and "осталось 30 дн." in text and "продлится" not in text and "автоматически" in text
+        assert "💎 Pro" in text and "осталось 30 дн." in text and "продлится" not in text and "автоматически" in text
         bot.handle_callback({"id": "c", "data": "auto", "message": {"chat": {"id": 5}, "message_id": 3}})
         assert storage.get_autoscan(5)                                   # автоскан теперь можно
         # продление через 30 дней: Telegram присылает новый successful_payment

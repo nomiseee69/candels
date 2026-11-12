@@ -34,10 +34,10 @@ def test_frames_of_one_coin_are_grouped():
     assert [f["interval"] for f in sol["frames"]] == ["1h", "4h", "1d"]  # от младшего ТФ к старшему
     caption = sol["caption"]
     # FVG ↑ и на 1H, и на 4H — совпадение по таймфреймам
-    assert caption.startswith("SOLUSDT: находки на 3 таймфреймах (1H, 4H, 1D)")
-    assert "Совпадение ТФ:\n• 1H FVG ↑ внутри 4H FVG ↑" in caption
+    assert caption.startswith("🔗 SOLUSDT: находки на 3 таймфреймах (1H, 4H, 1D)")
+    assert "🔗 Совпадение ТФ:\n• 1H FVG ↑ внутри 4H FVG ↑" in caption
     assert "• FVG ↑ сразу на 1H, 4H" in caption
-    assert caption.index("\n1H — комбинация") < caption.index("\n4H") < caption.index("\n1D")
+    assert caption.index("⏱ 1H  🔥 комбинация") < caption.index("⏱ 4H") < caption.index("⏱ 1D")
     assert "interval=60" in caption                                      # ссылка на младший ТФ
     assert coins[1]["caption"] == coins[1]["frames"][0]["caption"]       # один ТФ — как раньше
 
@@ -54,7 +54,7 @@ def test_one_pine_for_all_timeframes():
     df_1h, df_4h = frame_df(freq="h"), frame_df(freq="4h")
     groups = [(df_1h, [FVG], False, "1h"), (df_4h, [OB], True, "4h"), (df_4h, [], False, "4h")]
     code = pine_script("SOLUSDT", "1h", groups)
-    assert 'indicator("Pattern Finder v57 · SOLUSDT 1H 4H"' in code
+    assert 'indicator("Pattern Finder v58 · SOLUSDT 1H 4H"' in code
     assert 'show_1h = input.bool(true, "1H", group="Таймфреймы")' in code and 'show_4h = input.bool(true, "4H"' in code
     assert "chart_seconds = timeframe.in_seconds()" in code
     assert "if barstate.islast and show_4h and (not only_higher or chart_seconds <= 14400)" in code

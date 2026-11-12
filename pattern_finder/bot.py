@@ -267,7 +267,7 @@ def menu_text(chat_id):
     patterns = plural(count, "паттерн", "паттерна", "паттернов") if count else "паттернов пока нет"
     auto = "\n🔔 Автоскан включён — пришлю новые находки после закрытия свечи." \
         if get_autoscan(chat_id) and billing.is_pro(chat_id) else ""
-    return (f"Pattern Finder · {plan_line(chat_id)}\n"
+    return (f"📈 Pattern Finder · {plan_line(chat_id)}\n"
             f"{patterns} · {tfs} · топ-{get_coins(chat_id)} монет{auto}")
 
 
@@ -294,14 +294,14 @@ def profile_view(chat_id):
     """👤 Профиль: тариф, сколько осталось, что будет потом, лимиты, оплаты."""
     st = billing.status(chat_id)
     names = list(dict.fromkeys(p["name"] for p in get_patterns(chat_id)))
-    lines = [f"Профиль · ID {chat_id}", ""]
+    lines = [f"👤 Профиль · ID {chat_id}", ""]
     if st["admin"]:
-        lines.append("Тариф: Pro навсегда (ты админ)")
+        lines.append("Тариф: 💎 Pro навсегда (ты админ)")
     elif st.get("forever"):
-        lines.append("Тариф: Pro навсегда — подарок, без срока окончания")
+        lines.append("Тариф: ♾ Pro навсегда — подарок, без срока окончания")
     elif st["pro"]:
         left = billing.days_left(st["until"])
-        lines.append("Тариф: " + ("Pro — пробный период" if st["trial"] else "Pro"))
+        lines.append("Тариф: " + ("🎁 Pro — пробный период" if st["trial"] else "💎 Pro"))
         lines.append(f"Действует до: {billing.until_text(st['until'])} — осталось {left} дн.")
         if st.get("recurring"):
             lines.append("Продление: автоматически звёздами каждые 30 дней (отключить — в настройках Telegram).")
@@ -320,8 +320,8 @@ def profile_view(chat_id):
         lines.append("\nОплаты:")
         lines += [f"• {time.strftime('%d.%m.%Y', time.localtime(p['at']))} — "
                   f"{billing.PLANS.get(p['plan'], (0, 0, 0, p['plan']))[3]}, "
-                  + (f"{p['amount']:.0f} звёзд" if p["currency"] == "XTR" else f"{p['amount']:.0f} ₽") for p in paid]
-    button = "Продлить Pro" if st["pro"] and not st["admin"] else "Купить Pro"
+                  + (f"⭐ {p['amount']:.0f}" if p["currency"] == "XTR" else f"{p['amount']:.0f} ₽") for p in paid]
+    button = "💎 Продлить" if st["pro"] and not st["admin"] else "💎 Купить Pro"
     rows = [[{"text": button, "callback_data": "sub"}]] if not st["admin"] else []
     return "\n".join(lines), {"inline_keyboard": rows + [[TO_MENU]]}
 
@@ -329,11 +329,11 @@ def profile_view(chat_id):
 def subscription_view(chat_id):
     st = billing.status(chat_id)
     month, year = billing.PLANS["month"], billing.PLANS["year"]
-    lines = [f"Подписка · {plan_line(chat_id)}\n",
+    lines = [f"💎 Подписка · {plan_line(chat_id)}\n",
              "Pro — все паттерны, без лимита сканов, автоскан и ответы на любые вопросы.",
              f"Free — {billing.FREE['patterns']} паттерна и {billing.FREE['scans']} скана в день.\n",
-             f"Месяц — {month[1]} звёзд или {month[2]} ₽",
-             f"Год — {year[1]} звёзд или {year[2]} ₽, на 20% дешевле\n",
+             f"⭐ Месяц — {month[1]} звёзд или {month[2]} ₽",
+             f"⭐ Год — {year[1]} звёзд или {year[2]} ₽, на 20% дешевле\n",
              DISCLAIMER]
     rows = []
     try:
@@ -342,8 +342,8 @@ def subscription_view(chat_id):
         report_error("Ссылки на оплату звёздами", error)
         links = {}
     if links:
-        rows.append([{"text": f"Месяц — {month[1]} звёзд", "url": links["month"]}] if "month" in links else [])
-        rows.append([{"text": f"Год — {year[1]} звёзд", "url": links["year"]}] if "year" in links else [])
+        rows.append([{"text": f"⭐ Месяц — {month[1]}", "url": links["month"]}] if "month" in links else [])
+        rows.append([{"text": f"⭐ Год — {year[1]}", "url": links["year"]}] if "year" in links else [])
     if billing.yookassa_on():
         rows.append([{"text": f"💳 Месяц — {month[2]} ₽", "callback_data": "pay:month"},
                      {"text": f"💳 Год — {year[2]} ₽", "callback_data": "pay:year"}])
@@ -371,7 +371,7 @@ def pay_card(chat_id, plan):
         send_message("Не получилось создать оплату картой. Попробуй звёздами или позже.", chat_id,
                      {"inline_keyboard": [[{"text": "💎 Подписка", "callback_data": "sub"}]]})
         return
-    send_message(f"{billing.PLANS[plan][3]} — {billing.PLANS[plan][2]} ₽.\nОплати по кнопке; "
+    send_message(f"💳 {billing.PLANS[plan][3]} — {billing.PLANS[plan][2]} ₽.\nОплати по кнопке; "
                  "я сам замечу оплату в течение минуты (или нажми «Я оплатил»).", chat_id,
                  {"inline_keyboard": [[{"text": "💳 Оплатить", "url": url}],
                                       [{"text": "🔄 Я оплатил — проверить", "callback_data": "paycheck"}]]})
@@ -523,10 +523,10 @@ def user_card(key):
 def admin_grant(admin_id, key, days):
     if days is None:                                     # навсегда
         billing.grant_forever(key)
-        send_message("Тебе выдан Pro навсегда — все функции без ограничений. Спасибо, что с нами!", key)
+        send_message("🎁 Тебе выдан Pro навсегда — все функции без ограничений. Спасибо, что с нами!", key)
         return f"✅ {user_title(key)}: ♾ Pro навсегда"
     until = billing.extend(key, days, source="admin")
-    send_message(f"Тебе выдан Pro до {billing.until_text(until)}.", key)
+    send_message(f"🎁 Тебе выдан Pro до {billing.until_text(until)}.", key)
     return f"✅ {user_title(key)}: Pro до {billing.until_text(until)}"
 
 
@@ -798,11 +798,11 @@ def intro_view(chat_id, index):
     """Экран паттерна: как бот его ищет и что можно сделать. Главное — ТВОЙ пример."""
     name = ALL_PATTERNS[index]
     count = len(examples_of(chat_id, index))
-    text = f"{name}\n\nКак ищу: {PATTERN_INFO[name]}\n\n"
+    text = f"🧩 {name}\n\nКак ищу: {PATTERN_INFO[name]}\n\n"
     if count:
-        text += f"Ищу. Твоих примеров: {count}."
+        text += f"✅ Ищу. Твоих примеров: {count}."
     else:
-        text += "Пришли скриншот своего примера — буду искать похожие. Нет примера? «👀 Пример с рынка»."
+        text += "📷 Пришли скриншот своего примера — буду искать похожие. Нет примера? «👀 Пример с рынка»."
     rows = [[{"text": "📷 Прислать свой пример", "callback_data": f"shot:{index}"}],
             [{"text": "👀 Пример с рынка", "callback_data": f"demo:{index}"}]]
     if not count:
@@ -943,7 +943,7 @@ def save_demo(chat_id, index):
         plot_example(df, symbol, interval, item, path, f"{symbol} {interval.upper()} — {item['name']}")
     add_pattern(chat_id, item["name"], path, note=f"с рынка: {symbol} {interval.upper()}", **example)
     count = len(examples_of(chat_id, index))
-    send_message(f"Сохранил как пример №{count} к «{item['name']}» — теперь ищу и похожие на него.",
+    send_message(f"✅ Сохранил как пример №{count} к «{item['name']}» — теперь ищу и похожие на него.",
                  chat_id, {"inline_keyboard": [[{"text": "🖼 Мои примеры", "callback_data": f"gal:{index}:{count - 1}"},
                                                 CLOSE]]})
 
@@ -951,11 +951,11 @@ def save_demo(chat_id, index):
 # --- настройки (всё листается в одном сообщении) ----------------------------------------------------
 def settings_text(chat_id):
     tfs = ", ".join(i.upper() for i in get_intervals(chat_id))
-    return f"Настройки\nТаймфреймы: {tfs} · топ-{get_coins(chat_id)} монет\n\nНажми, чтобы изменить."
+    return f"⚙️ Настройки\nТаймфреймы: {tfs} · топ-{get_coins(chat_id)} монет\n\nНажми, чтобы изменить."
 
 
 SETTINGS_HELP = (
-    "Что значат настройки:\n"
+    "❓ Что значат настройки:\n"
     "🎯 FVG — только сильные или все\n"
     "🧩 Комбинации — только монеты, где нашлось 2+ паттерна\n"
     "🖼 Похожие на пример — только похожие на твои скрины\n"
@@ -1000,7 +1000,7 @@ def settings_view(chat_id):
     return settings_text(chat_id), settings_keyboard(chat_id)
 
 
-COINS_TEXT = ("Сколько самых торгуемых монет Binance проверять? Чем больше — тем дольше "
+COINS_TEXT = ("🪙 Сколько самых торгуемых монет Binance проверять? Чем больше — тем дольше "
               "сканирование, но больше находок.")
 
 
@@ -1013,7 +1013,7 @@ def coins_keyboard(chat_id):
     return {"inline_keyboard": [row, [{"text": "⬅️ К настройкам", "callback_data": "settings"}]]}
 
 
-TF_TEXT = "На каких таймфреймах искать? Нажимай, чтобы включить или выключить:"
+TF_TEXT = "⏱ На каких таймфреймах искать? Нажимай, чтобы включить или выключить:"
 
 
 def interval_keyboard(chat_id):
@@ -1230,9 +1230,9 @@ def explain(chat_id, wish):
         opened = "gal" if examples_of(chat_id, index) else "pick"
         rows = [[{"text": f"🧩 Открыть «{name}»", "callback_data": f"{opened}:{index}" + (":0" if opened == "gal" else "")},
                  {"text": "👀 Пример с рынка", "callback_data": f"demo:{index}"}], [TO_MENU]]
-        send_message(f"{name}\n\n{PATTERN_INFO[name]}", chat_id, {"inline_keyboard": rows})
+        send_message(f"🧩 {name}\n\n{PATTERN_INFO[name]}", chat_id, {"inline_keyboard": rows})
     else:
-        send_message(f"{GLOSSARY[term]}", chat_id, {"inline_keyboard": [[TO_MENU]]})
+        send_message(f"📖 {GLOSSARY[term]}", chat_id, {"inline_keyboard": [[TO_MENU]]})
 
 
 def quick_reply(chat_id, wish):
@@ -1303,7 +1303,7 @@ def free_text(chat_id, text):
     elif kind == "question":
         reply = brain.answer(text)
         if reply:
-            send_message(reply, chat_id, {"inline_keyboard": [[TO_MENU]]})
+            send_message("🧠 " + reply, chat_id, {"inline_keyboard": [[TO_MENU]]})
         elif not (quick and quick_reply(chat_id, quick)):
             show_menu(chat_id)
     elif kind == "scan":
@@ -1335,7 +1335,7 @@ def brain_allowed(chat_id, now=None):
 def brain_notice(chat_id, text):
     """«Думаю…» — и честно про очередь, если нейросеть сейчас занята другим."""
     if brain.busy():
-        send_message("Нейросеть сейчас отвечает другому — ты следующий, это займёт чуть дольше.", chat_id)
+        send_message("🧠 Нейросеть сейчас отвечает другому — ты следующий, это займёт чуть дольше.", chat_id)
     elif text:
         send_message(text, chat_id)
 
@@ -1653,7 +1653,7 @@ def record_vote(chat_id, coin, index, vote, quiet=False):
     lines = [head]
     changes = what_changed(before, after, vote)
     if changes:
-        lines.append("Переучился по твоим оценкам:\n• " + "\n• ".join(changes))
+        lines.append("🎓 Переучился по твоим оценкам:\n• " + "\n• ".join(changes))
     if after["rules"] and after["rules"] != before["rules"]:
         lines.append("Присылаю только: " + "; ".join(rule_text(r) for r in after["rules"]))
     if after.get("head") and not before.get("head"):
@@ -1751,7 +1751,7 @@ def save_example(chat_id, card_id, index):
     if index_name is not None:
         keyboard = {"inline_keyboard": [[{"text": "🖼 Посмотреть примеры", "callback_data": f"gal:{index_name}:{count - 1}"},
                                          CLOSE]]}
-    send_message(f"Сохранил как пример №{count} к «{item['name']}». Теперь ищу и похожие на него.",
+    send_message(f"✅ Сохранил как пример №{count} к «{item['name']}». Теперь ищу и похожие на него.",
                  chat_id, keyboard)
 
 
@@ -1809,7 +1809,7 @@ def show_patterns(chat_id, card_id, reply_to=None):
     if coin is None:
         outdated(chat_id)
         return
-    send_message(f"{coin['symbol']}: что нанести на график TradingView?\n"
+    send_message(f"🧩 {coin['symbol']}: что нанести на график TradingView?\n"
                  "Сними галочки с лишнего и нажми «Разметка выбранного».",
                  chat_id, patterns_keyboard(chat_id, card_id, coin), reply_to=reply_to)
 
@@ -1838,7 +1838,7 @@ def send_markup(chat_id, coin, groups, code, filename, reply_to, **help_options)
     в подписи — что на графике, под файлом — ссылки на TradingView и меню."""
     intervals = list(dict.fromkeys(g[3] for g in groups if len(g) == 4)) or [coin["frames"][0]["interval"]]
     first = intervals[0]
-    caption = f"{coin['symbol']} — разметка для TradingView\n" + pine_help(
+    caption = f"📈 {coin['symbol']} — разметка для TradingView\n" + pine_help(
         coin["symbol"], first, groups, howto=False, **help_options)
     path = f"pine_{chat_id}_{int(time.time() * 1000)}.txt"
     with open(path, "w", encoding="utf-8") as f:
@@ -1927,15 +1927,15 @@ def coin_line(coin, limit=90):
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
-def results_title(coins, head="Нашлось"):
+def results_title(coins, head="🔍 Нашлось"):
     """Заголовок списка: сколько монет и что в них особенного."""
     combos = sum(any(len(f["items"]) > 1 for f in c["frames"]) for c in coins)
     multi = sum(len(c["frames"]) > 1 for c in coins)
     linked = sum(confluence_score(c.get("confluence", [])) > 0 for c in coins)
     title = f"{head} на {plural(len(coins), 'монете', 'монетах', 'монетах')}"
-    extras = [f"совпадения ТФ: {linked}"] if linked else []
+    extras = [f"🔗 совпадения ТФ: {linked}"] if linked else []
     if combos:
-        extras.append(f"комбинации: {combos}")
+        extras.append(f"🔥 комбинации: {combos}")
     if multi:
         extras.append(f"на нескольких ТФ: {multi}")
     return title + (" (" + ", ".join(extras) + ")" if extras else "")
@@ -2138,7 +2138,7 @@ def find_coin(chat_id, query):
     if len(similar) > 1:
         buttons = [{"text": s.removesuffix("USDT"), "callback_data": f"v:{cid}"}
                    for s, cid in list(similar.items())[:FIND_BUTTONS]]
-        send_message("Похожие монеты в последних результатах:", chat_id,
+        send_message("🔎 Похожие монеты в последних результатах:", chat_id,
                      {"inline_keyboard": _grid(buttons, 4) + [[HOME]]})
         return
     if len(similar) == 1:
@@ -2160,7 +2160,7 @@ def check_coin(chat_id, symbol):
                      {"inline_keyboard": [[TO_MENU]]})
         return
     tfs = ", ".join(i.upper() for i in intervals)
-    wait_id = send_message(f"В последних результатах {symbol} нет — проверяю сейчас ({tfs})…", chat_id)
+    wait_id = send_message(f"🔎 В последних результатах {symbol} нет — проверяю сейчас ({tfs})…", chat_id)
     # при поиске конкретной монеты показываем всё, что на ней есть: без «только комбинации»
     settings = {**get_settings(chat_id), "combos_only": False}
     cards, _ = scan_user(search_patterns(chat_id, patterns), intervals, symbols=[symbol], settings=settings,
@@ -2191,7 +2191,7 @@ def run_scan(chat_id):
     intervals = get_intervals(chat_id)
     tfs = ", ".join(i.upper() for i in intervals)
     coins = get_coins(chat_id)
-    wait_id = send_message(f"Сканирую топ-{coins} монет ({tfs}), {wait_text(coins, intervals)}…", chat_id)
+    wait_id = send_message(f"🔍 Сканирую топ-{coins} монет ({tfs}), {wait_text(coins, intervals)}…", chat_id)
     settings = get_settings(chat_id)
     cards, skipped = scan_user(search_patterns(chat_id, patterns), intervals, symbols=top_symbols(coins), settings=settings,
                                judge=user_judge(chat_id, settings))
@@ -2230,11 +2230,11 @@ def run_history(chat_id):
         return
     intervals = get_intervals(chat_id)
     coins = get_coins(chat_id)
-    wait_id = send_message(f"Считаю историю по топ-{coins} монет, {wait_text(coins * 2, intervals)}…", chat_id)
+    wait_id = send_message(f"📊 Считаю историю по топ-{coins} монет, {wait_text(coins * 2, intervals)}…", chat_id)
     reports, cards, skipped = history_user(search_patterns(chat_id, patterns), intervals, symbols=top_symbols(coins),
                                            settings=get_settings(chat_id))
     report_skipped(chat_id, skipped)
-    say(chat_id, wait_id, f"История по топ-{coins} монет готова.")
+    say(chat_id, wait_id, f"📊 История по топ-{coins} монет готова.")
     for report in reports:
         for part in split_text(report):
             send_message(part, chat_id)
@@ -2515,7 +2515,7 @@ def handle_callback(query):
         if pattern is None or pattern["name"] not in ALL_PATTERNS:
             show_menu(chat_id)
             return
-        send_message(f"Сохранил «{pattern['name']}». Добавь ещё пример или запускай поиск.",
+        send_message(f"✅ Сохранил «{pattern['name']}». Добавь ещё пример или запускай поиск.",
                      chat_id, saved_keyboard(ALL_PATTERNS.index(pattern["name"])))
         return
 
