@@ -676,6 +676,12 @@ def _groups(cols):
     # много по числу, но мало по площади
     runs = np.sort(np.array(runs))
     width = max(1, int(runs[np.searchsorted(np.cumsum(runs), 0.5 * runs.sum())]))
+    # цвет может «рябить» внутри одной свечи (чёрно-белые свечи с контуром, сглаживание): тогда отрезки
+    # одного цвета получаются куда уже самих свечей. Делить по такому цвету нельзя — свеча разъедется
+    # на столбцы; считаем свечами сами кучки
+    blob = float(np.median([len(b) for b in blobs]))
+    if width < 0.5 * blob:
+        return _split_blobs(cols, blobs, max(1, int(round(blob))))
     weak = max(1, int(round(0.34 * width)))           # обрывок: край тела, сглаживание, «мигание» цвета
     groups = []
     for blob in blobs:
@@ -706,7 +712,13 @@ def _groups(cols):
                     merged.append(part)
             parts = merged
         groups += [part[1] for part in parts]
-    width = max(1, int(np.median([len(g) for g in groups])))
+    return _split_blobs(cols, groups, max(1, int(np.median([len(g) for g in groups]))))
+
+
+def _split_blobs(cols, groups, width):
+    """Группы столбцов → свечи: слишком широкие (несколько свечей вплотную) делим по шагу."""
+    if not groups:
+        return []
     # шаг между свечами — по одиночным свечам (у них центр точно на месте). На плотном графике
     # соседние свечи одного цвета сливаются в одну группу — делим её по ШАГУ, а не по ширине тела
     singles = [float(np.mean(g)) for g in groups if len(g) <= 1.5 * width]

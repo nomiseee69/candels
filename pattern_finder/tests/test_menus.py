@@ -79,7 +79,7 @@ def test_patterns_list_shows_all_and_pick_flow(tmp_path):
         fvg = ALL_PATTERNS.index("FVG")
         press(f"pick:{fvg}")                                            # ➕ — объяснение и действия
         text, keyboard = rec.edited[-1]
-        assert text.startswith("🧩 FVG") and "Как ищу:" in text and 5 not in bot.waiting
+        assert text.startswith("FVG") and "Как ищу:" in text and 5 not in bot.waiting
         assert "Пришли скриншот своего примера" in text
         assert datas(keyboard) == [f"shot:{fvg}", f"demo:{fvg}", f"on:{fvg}", "my", "menu"]   # свой пример — первым
         press(f"shot:{fvg}")
@@ -89,7 +89,7 @@ def test_patterns_list_shows_all_and_pick_flow(tmp_path):
         press("my")                                                     # назад — к списку, ожидание снято
         assert 5 not in bot.waiting and rec.edited[-1][0].startswith("📂 Паттерны")
         press("menu")
-        assert rec.edited[-1][0].startswith("🤖 Pattern Finder")
+        assert rec.edited[-1][0].startswith("Pattern Finder")
     finally:
         storage.FILE = original
         rec.restore()
@@ -125,7 +125,7 @@ def test_gallery_browse_and_delete(tmp_path):
         assert storage.get_patterns(5) == [] and 78 in rec.deleted
         assert rec.sent[-1][0].startswith("📂 Выбери паттерн")
         press("menu", message_id=79, photo=True)                        # из галереи — меню вместо картинки
-        assert 79 in rec.deleted and rec.sent[-1][0].startswith("🤖 Pattern Finder")
+        assert 79 in rec.deleted and rec.sent[-1][0].startswith("Pattern Finder")
     finally:
         bot.PATTERNS_DIR = saved_dir
         storage.FILE = original
@@ -137,19 +137,19 @@ def test_settings_change_in_place(tmp_path):
     original = use_storage(tmp_path)
     try:
         press("settings")
-        assert rec.edited[-1][0].startswith("⚙️ Настройки") and not rec.sent
+        assert rec.edited[-1][0].startswith("Настройки") and not rec.sent
         press("tf")
-        assert rec.edited[-1][0].startswith("⏱ На каких")
+        assert rec.edited[-1][0].startswith("На каких")
         press("tf:1d")
         assert "✅ 1D" in [b["text"] for b in buttons(rec.keyboards[-1])]
         press("tf_done")
-        assert rec.edited[-1][0].startswith("⚙️ Настройки")
+        assert rec.edited[-1][0].startswith("Настройки")
         press("coins")
         assert "settings" in datas(rec.edited[-1][1])
         press("coins:100")
-        assert storage.get_coins(5) == 100 and rec.edited[-1][0].startswith("⚙️ Настройки")
+        assert storage.get_coins(5) == 100 and rec.edited[-1][0].startswith("Настройки")
         press("auto")
-        assert rec.edited[-1][0].startswith("🤖 Pattern Finder") and "Автоскан включён" in rec.edited[-1][0]
+        assert rec.edited[-1][0].startswith("Pattern Finder") and "Автоскан включён" in rec.edited[-1][0]
         assert not rec.sent                                              # ни одного нового сообщения
     finally:
         storage.FILE = original
@@ -176,7 +176,7 @@ def test_home_button_everywhere():
         press("find")
         assert rec.edited[-1][0].startswith("🔎 Напиши тикер") and datas(rec.edited[-1][1]) == ["menu"]
         press("home", message_id=90, photo=True)                         # под файлом/картинкой — новое меню
-        assert rec.sent[-1][0].startswith("🤖 Pattern Finder") and 90 not in rec.deleted
+        assert rec.sent[-1][0].startswith("Pattern Finder") and 90 not in rec.deleted
         press("hide", message_id=91)
         assert 91 in rec.deleted
     finally:
@@ -233,7 +233,7 @@ def test_markup_file_replies_to_card_with_links(tmp_path):
         groups = [(df, [], True, "1h"), (df, [], True, "4h")]
         bot.send_markup(5, coin, groups, "//@version=5", "SOLUSDT_patterns.pine.txt", 123)
         caption, filename, keyboard, reply_to = rec.docs[-1]
-        assert reply_to == 123 and caption.startswith("📈 SOLUSDT — разметка для TradingView")
+        assert reply_to == 123 and caption.startswith("SOLUSDT — разметка для TradingView")
         assert len(caption) <= bot.CAPTION_LIMIT
         urls = [b["url"] for b in buttons(keyboard) if "url" in b]
         assert len(urls) == 2 and "interval=240" in urls[1]
@@ -262,7 +262,7 @@ def test_enable_without_screenshot(tmp_path):
         detectors, skipped = scanner.build_detectors(patterns)
         assert skipped == [] and [name for name, _ in detectors] == ["FVG", "Двойное дно"]
         press(f"pick:{fvg}")
-        assert "✅ Ищу. Твоих примеров: 1" in rec.edited[-1][0] and f"on:{fvg}" not in datas(rec.edited[-1][1])
+        assert "Ищу. Твоих примеров: 1" in rec.edited[-1][0] and f"on:{fvg}" not in datas(rec.edited[-1][1])
         press(f"gal:{double}:0")                                        # в галерее — карточка эталона
         kind, caption, _ = rec.photos[-1]
         assert "без скриншота — встроенный эталон" in caption
@@ -282,8 +282,8 @@ def test_welcome_for_new_user_and_commands(tmp_path):
     bot.find_coin = lambda chat_id, query: jobs.append(("find", query))
     try:
         bot.handle_message({"chat": {"id": 9}, "text": "привет"})       # первое сообщение — приветствие
-        assert rec.sent[0][0].startswith("👋 Привет! Я Pattern Finder") and "Мои паттерны" in rec.sent[0][0]
-        assert rec.sent[-1][0].startswith("🤖 Pattern Finder")           # и меню
+        assert rec.sent[0][0].startswith("Pattern Finder") and "скриншот" in rec.sent[0][0]
+        assert rec.sent[-1][0].startswith("Pattern Finder")           # и меню
         count = len(rec.sent)
         bot.handle_message({"chat": {"id": 9}, "text": "привет"})       # второй раз — только меню
         assert len(rec.sent) == count + 1
@@ -291,11 +291,11 @@ def test_welcome_for_new_user_and_commands(tmp_path):
         bot.handle_message({"chat": {"id": 9}, "text": "/find sol"})
         assert jobs == ["run_scan", ("find", "sol")]
         bot.handle_message({"chat": {"id": 9}, "text": "/help"})
-        assert rec.sent[-1][0].startswith("👋 Привет!")
+        assert rec.sent[-1][0].startswith("Pattern Finder")
         bot.handle_message({"chat": {"id": 9}, "text": "/patterns"})
         assert rec.sent[-1][0].startswith("📂")
         press("help", chat_id=9)
-        assert rec.edited[-1][0].startswith("👋 Привет!")
+        assert rec.edited[-1][0].startswith("Pattern Finder")
     finally:
         bot.start_job, bot.find_coin = saved
         storage.FILE = original

@@ -322,14 +322,13 @@ def read_lines_figure(name, path):
     if df is None or len(df) < 30:
         return None
     n = len(df)
-    windows = [w for w in WINDOWS if w <= n] + [w for w in (40, 65, 100) if w <= n]   # как на рынке + промежуточные
-    found = history_lines(df, FAMILY_BY_PATTERN[name], windows, 0.6)
-    if not found:
-        # на скрине свечей немного — можно искать подробнее: окна через 5 свечей, сдвиг по 2,
-        # и чуть мягче к ровности линий (свечи со скрина в пикселях, касания чуть «шумят»)
-        fine = sorted(set(range(30, n + 1, 5)) | set(windows))
-        found = history_lines(df, FAMILY_BY_PATTERN[name], fine, 0.6, step=2) \
-            or history_lines(df, FAMILY_BY_PATTERN[name], fine, 0.5, step=2)
+    # Скрин — это одна картинка, а не весь рынок: ищем сразу ПОДРОБНО (окна через 5 свечей, сдвиг по 2).
+    # Раньше сначала шёл грубый проход, и если он что-то находил, подробный не запускался — из-за этого
+    # бот мог взять «почти фигуру» на 70 свечах и не увидеть настоящую, чуть более короткую.
+    windows = sorted(set([w for w in WINDOWS if w <= n] + [w for w in (40, 65, 100) if w <= n])
+                     | set(range(30, n + 1, 5)))
+    found = history_lines(df, FAMILY_BY_PATTERN[name], windows, 0.6, step=2) \
+        or history_lines(df, FAMILY_BY_PATTERN[name], windows, 0.5, step=2)
     if not found:
         return None
     # фигура, ради которой делали скрин, обычно крупная и ближе к правому краю

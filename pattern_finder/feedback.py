@@ -465,7 +465,7 @@ def summary(feedback):
         return ("Пока нет ни одной оценки. Ставь 👍 / 👎 под алертами — с первых оценок "
                 "я начну подстраивать под тебя, какие критерии паттерна важнее и насколько "
                 "строго отбирать находки.")
-    lines = ["📚 Чему я научился по твоим оценкам:"]
+    lines = ["Чему я научился по твоим оценкам:"]
     for name, entry in sorted(model.items()):
         records = entry["records"]
         likes = sum(r["vote"] > 0 for r in records)
@@ -490,6 +490,6 @@ def summary(feedback):
         if entry["rules"]:
             line += "\n   присылаю только: " + "; ".join(rule_text(r) for r in entry["rules"])
         if entry.get("head"):
-            line += "\n   🧠 запомнил, как выглядят находки, которые тебе нравятся"
+            line += "\n   запомнил, как выглядят находки, которые тебе нравятся"
         lines.append(line)
     return "\n".join(lines)

@@ -42,7 +42,7 @@ def test_opposite_directions_do_not_match_and_warn():
     found = confluences(c)
     assert not any("внутри" in f["text"] for f in found)
     assert any(f["weight"] < 0 and "против тренда" in f["text"] for f in found)
-    assert caption_block(found).startswith("🔗 Совпадение ТФ:") or caption_block(found).startswith("⚠️")
+    assert caption_block(found).startswith("Совпадение ТФ:") or caption_block(found).startswith("⚠️")
 
 
 def test_same_signal_on_several_timeframes():

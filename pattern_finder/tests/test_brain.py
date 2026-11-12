@@ -121,7 +121,7 @@ def test_free_text_question_gets_an_answer(tmp_path):
                       "Order Block — последняя свеча перед сильным движением."])
     try:
         bot.handle_message({"chat": {"id": 5}, "text": "что такое ордер блок простыми словами?"})
-        assert rec.sent[-1][0].startswith("🧠 Order Block —")
+        assert rec.sent[-1][0].startswith("Order Block —")
         assert fake.asked[1][1] is None                          # ответ текстом, без схемы
     finally:
         fake.restore()

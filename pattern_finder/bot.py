@@ -108,7 +108,7 @@ def start_job(chat_id, func, *args):
     """Запускает долгую задачу в фоне. Одному человеку — одна задача за раз."""
     with busy_lock:
         if chat_id in busy:
-            send_message("⏳ Ещё работаю над прошлым запросом — пришлю, как закончу.", chat_id,
+            send_message("Ещё работаю над прошлым запросом — пришлю, как закончу.", chat_id,
                          {"inline_keyboard": [[{"text": "✖️ Ок", "callback_data": "hide"}]]})
             return
         busy.add(chat_id)
@@ -116,7 +116,7 @@ def start_job(chat_id, func, *args):
         queued += 1
         ahead = queued - MAX_PARALLEL
     if ahead > 0:
-        send_message(f"⏳ Много запросов — ты в очереди, перед тобой {ahead}. Начну сразу, как освободится.",
+        send_message(f"Много запросов — ты в очереди, перед тобой {ahead}. Начну сразу, как освободится.",
                      chat_id)
 
     def run():
@@ -124,7 +124,7 @@ def start_job(chat_id, func, *args):
             func(chat_id, *args)
         except Exception as error:
             report_error("Ошибка в фоновой задаче", error)
-            send_message("😕 Что-то пошло не так, попробуй ещё раз чуть позже.", chat_id,
+            send_message("Что-то пошло не так, попробуй ещё раз чуть позже.", chat_id,
                          {"inline_keyboard": [[{"text": "🏠 Меню", "callback_data": "home"}]]})
         finally:
             global queued
@@ -267,8 +267,8 @@ def menu_text(chat_id):
     patterns = plural(count, "паттерн", "паттерна", "паттернов") if count else "паттернов пока нет"
     auto = "\n🔔 Автоскан включён — пришлю новые находки после закрытия свечи." \
         if get_autoscan(chat_id) and billing.is_pro(chat_id) else ""
-    return (f"🤖 Pattern Finder\n{patterns} · {tfs} · топ-{get_coins(chat_id)} монет{auto}\n"
-            f"{plan_line(chat_id)}\nЧто делаем?")
+    return (f"Pattern Finder · {plan_line(chat_id)}\n"
+            f"{patterns} · {tfs} · топ-{get_coins(chat_id)} монет{auto}")
 
 
 # --- подписка ---------------------------------------------------------------------------------------
@@ -279,30 +279,29 @@ def plan_line(chat_id):
     """Тариф одной строкой — в меню."""
     st = billing.status(chat_id)
     if st["admin"]:
-        return "Тариф: 💎 Pro (админ)"
+        return "Pro (админ)"
     if st.get("forever"):
-        return "Тариф: ♾ Pro навсегда"
+        return "Pro навсегда"
     if st["pro"]:
         left = billing.days_left(st["until"])
-        name = "🎁 Pro, пробный период" if st["trial"] else "💎 Pro"
+        name = "Pro, пробный период" if st["trial"] else "Pro"
         tail = ", продлится сам" if st.get("recurring") else ""
-        return f"Тариф: {name} — осталось {left} дн. (до {billing.until_text(st['until'])}){tail}"
-    return (f"Тариф: Free — {billing.FREE['patterns']} паттерна, сканов сегодня: "
-            f"{billing.scans_left(chat_id)} из {billing.FREE['scans']}")
+        return f"{name} — осталось {left} дн. (до {billing.until_text(st['until'])}){tail}"
+    return f"Free — сканов сегодня {billing.scans_left(chat_id)} из {billing.FREE['scans']}"
 
 
 def profile_view(chat_id):
     """👤 Профиль: тариф, сколько осталось, что будет потом, лимиты, оплаты."""
     st = billing.status(chat_id)
     names = list(dict.fromkeys(p["name"] for p in get_patterns(chat_id)))
-    lines = [f"👤 Профиль · ID {chat_id}", ""]
+    lines = [f"Профиль · ID {chat_id}", ""]
     if st["admin"]:
-        lines.append("Тариф: 💎 Pro навсегда (ты админ)")
+        lines.append("Тариф: Pro навсегда (ты админ)")
     elif st.get("forever"):
-        lines.append("Тариф: ♾ Pro навсегда — подарок, без срока окончания")
+        lines.append("Тариф: Pro навсегда — подарок, без срока окончания")
     elif st["pro"]:
         left = billing.days_left(st["until"])
-        lines.append("Тариф: " + ("🎁 Pro — пробный период" if st["trial"] else "💎 Pro"))
+        lines.append("Тариф: " + ("Pro — пробный период" if st["trial"] else "Pro"))
         lines.append(f"Действует до: {billing.until_text(st['until'])} — осталось {left} дн.")
         if st.get("recurring"):
             lines.append("Продление: автоматически звёздами каждые 30 дней (отключить — в настройках Telegram).")
@@ -321,8 +320,8 @@ def profile_view(chat_id):
         lines.append("\nОплаты:")
         lines += [f"• {time.strftime('%d.%m.%Y', time.localtime(p['at']))} — "
                   f"{billing.PLANS.get(p['plan'], (0, 0, 0, p['plan']))[3]}, "
-                  + (f"⭐ {p['amount']:.0f}" if p["currency"] == "XTR" else f"{p['amount']:.0f} ₽") for p in paid]
-    button = "💎 Продлить" if st["pro"] and not st["admin"] else "💎 Купить Pro"
+                  + (f"{p['amount']:.0f} звёзд" if p["currency"] == "XTR" else f"{p['amount']:.0f} ₽") for p in paid]
+    button = "Продлить Pro" if st["pro"] and not st["admin"] else "Купить Pro"
     rows = [[{"text": button, "callback_data": "sub"}]] if not st["admin"] else []
     return "\n".join(lines), {"inline_keyboard": rows + [[TO_MENU]]}
 
@@ -330,11 +329,11 @@ def profile_view(chat_id):
 def subscription_view(chat_id):
     st = billing.status(chat_id)
     month, year = billing.PLANS["month"], billing.PLANS["year"]
-    lines = [f"💎 Подписка\n{plan_line(chat_id)}\n",
-             "Pro — все паттерны, без лимита сканов, 🔔 автоскан и ответы на любые вопросы.",
+    lines = [f"Подписка · {plan_line(chat_id)}\n",
+             "Pro — все паттерны, без лимита сканов, автоскан и ответы на любые вопросы.",
              f"Free — {billing.FREE['patterns']} паттерна и {billing.FREE['scans']} скана в день.\n",
-             f"• месяц — ⭐ {month[1]} или {month[2]} ₽",
-             f"• год — ⭐ {year[1]} или {year[2]} ₽ (−20%)\n",
+             f"Месяц — {month[1]} звёзд или {month[2]} ₽",
+             f"Год — {year[1]} звёзд или {year[2]} ₽, на 20% дешевле\n",
              DISCLAIMER]
     rows = []
     try:
@@ -343,14 +342,14 @@ def subscription_view(chat_id):
         report_error("Ссылки на оплату звёздами", error)
         links = {}
     if links:
-        rows.append([{"text": f"⭐ Месяц — {month[1]}", "url": links["month"]}] if "month" in links else [])
-        rows.append([{"text": f"⭐ Год — {year[1]}", "url": links["year"]}] if "year" in links else [])
+        rows.append([{"text": f"Месяц — {month[1]} звёзд", "url": links["month"]}] if "month" in links else [])
+        rows.append([{"text": f"Год — {year[1]} звёзд", "url": links["year"]}] if "year" in links else [])
     if billing.yookassa_on():
         rows.append([{"text": f"💳 Месяц — {month[2]} ₽", "callback_data": "pay:month"},
                      {"text": f"💳 Год — {year[2]} ₽", "callback_data": "pay:year"}])
     rows = [r for r in rows if r]
     if not rows:
-        lines.append("\n⚠️ Оплата сейчас недоступна — напиши администратору.")
+        lines.append("\nОплата сейчас недоступна — напиши администратору.")
     rows.append([TO_MENU])
     return "\n".join(lines), {"inline_keyboard": rows}
 
@@ -359,9 +358,9 @@ def paywall(chat_id, reason):
     texts = {
         "patterns": f"На Free можно искать до {billing.FREE['patterns']} разных паттернов.",
         "scans": f"На Free — {billing.FREE['scans']} скана в день, сегодня они закончились.",
-        "autoscan": "🔔 Автоскан — функция Pro: бот сам присылает находки после закрытия каждой свечи.",
+        "autoscan": "Автоскан — функция Pro: бот сам присылает находки после закрытия каждой свечи.",
     }
-    send_message(texts[reason] + "\n\n💎 В Pro ограничений нет.", chat_id,
+    send_message(texts[reason] + "\n\nВ Pro ограничений нет.", chat_id,
                  {"inline_keyboard": [[{"text": "💎 Подписка", "callback_data": "sub"}, TO_MENU]]})
 
 
@@ -369,10 +368,10 @@ def pay_card(chat_id, plan):
     """💳 ЮKassa: ссылка на оплату + кнопка «проверить»."""
     url = billing.yookassa_create(chat_id, plan)
     if url is None:
-        send_message("😕 Не получилось создать оплату картой. Попробуй звёздами или позже.", chat_id,
+        send_message("Не получилось создать оплату картой. Попробуй звёздами или позже.", chat_id,
                      {"inline_keyboard": [[{"text": "💎 Подписка", "callback_data": "sub"}]]})
         return
-    send_message(f"💳 {billing.PLANS[plan][3]} — {billing.PLANS[plan][2]} ₽.\nОплати по кнопке; "
+    send_message(f"{billing.PLANS[plan][3]} — {billing.PLANS[plan][2]} ₽.\nОплати по кнопке; "
                  "я сам замечу оплату в течение минуты (или нажми «Я оплатил»).", chat_id,
                  {"inline_keyboard": [[{"text": "💳 Оплатить", "url": url}],
                                       [{"text": "🔄 Я оплатил — проверить", "callback_data": "paycheck"}]]})
@@ -524,10 +523,10 @@ def user_card(key):
 def admin_grant(admin_id, key, days):
     if days is None:                                     # навсегда
         billing.grant_forever(key)
-        send_message("🎁 Тебе выдан Pro навсегда — все функции без ограничений. Спасибо, что с нами!", key)
+        send_message("Тебе выдан Pro навсегда — все функции без ограничений. Спасибо, что с нами!", key)
         return f"✅ {user_title(key)}: ♾ Pro навсегда"
     until = billing.extend(key, days, source="admin")
-    send_message(f"🎁 Тебе выдан Pro до {billing.until_text(until)}.", key)
+    send_message(f"Тебе выдан Pro до {billing.until_text(until)}.", key)
     return f"✅ {user_title(key)}: Pro до {billing.until_text(until)}"
 
 
@@ -572,7 +571,7 @@ def admin_callback(chat_id, message_id, value, media):
         send_message(admin_refund(parts[1]), chat_id)
     elif action == "backup":
         path = storage.backup()
-        send_message(f"💾 Копия базы: {path}" if path else "Базы ещё нет.", chat_id)
+        send_message(f"Копия базы: {path}" if path else "Базы ещё нет.", chat_id)
     elif action == "bc":
         writing_broadcast.add(chat_id)
         send_message("📣 Напиши следующим сообщением текст рассылки — я покажу, как он выглядит, и спрошу, "
@@ -638,7 +637,7 @@ def admin_command(chat_id, command, argument):
             admin_callback(chat_id, None, "bc", False)
     elif command == "/backup":
         path = storage.backup()
-        send_message(f"💾 Копия базы: {path}" if path else "Базы ещё нет.", chat_id)
+        send_message(f"Копия базы: {path}" if path else "Базы ещё нет.", chat_id)
     return True
 
 
@@ -799,11 +798,11 @@ def intro_view(chat_id, index):
     """Экран паттерна: как бот его ищет и что можно сделать. Главное — ТВОЙ пример."""
     name = ALL_PATTERNS[index]
     count = len(examples_of(chat_id, index))
-    text = f"🧩 {name}\n\nКак ищу: {PATTERN_INFO[name]}\n\n"
+    text = f"{name}\n\nКак ищу: {PATTERN_INFO[name]}\n\n"
     if count:
-        text += f"✅ Ищу. Твоих примеров: {count}."
+        text += f"Ищу. Твоих примеров: {count}."
     else:
-        text += "📷 Пришли скриншот своего примера — буду искать похожие. Нет примера? «👀 Пример с рынка»."
+        text += "Пришли скриншот своего примера — буду искать похожие. Нет примера? «👀 Пример с рынка»."
     rows = [[{"text": "📷 Прислать свой пример", "callback_data": f"shot:{index}"}],
             [{"text": "👀 Пример с рынка", "callback_data": f"demo:{index}"}]]
     if not count:
@@ -944,7 +943,7 @@ def save_demo(chat_id, index):
         plot_example(df, symbol, interval, item, path, f"{symbol} {interval.upper()} — {item['name']}")
     add_pattern(chat_id, item["name"], path, note=f"с рынка: {symbol} {interval.upper()}", **example)
     count = len(examples_of(chat_id, index))
-    send_message(f"💾 Сохранил как пример №{count} к «{item['name']}» — теперь ищу и похожие на него.",
+    send_message(f"Сохранил как пример №{count} к «{item['name']}» — теперь ищу и похожие на него.",
                  chat_id, {"inline_keyboard": [[{"text": "🖼 Мои примеры", "callback_data": f"gal:{index}:{count - 1}"},
                                                 CLOSE]]})
 
@@ -952,11 +951,11 @@ def save_demo(chat_id, index):
 # --- настройки (всё листается в одном сообщении) ----------------------------------------------------
 def settings_text(chat_id):
     tfs = ", ".join(i.upper() for i in get_intervals(chat_id))
-    return f"⚙️ Настройки\nТаймфреймы: {tfs} · топ-{get_coins(chat_id)} монет\n\nНажми, чтобы изменить."
+    return f"Настройки\nТаймфреймы: {tfs} · топ-{get_coins(chat_id)} монет\n\nНажми, чтобы изменить."
 
 
 SETTINGS_HELP = (
-    "❓ Что значат настройки:\n"
+    "Что значат настройки:\n"
     "🎯 FVG — только сильные или все\n"
     "🧩 Комбинации — только монеты, где нашлось 2+ паттерна\n"
     "🖼 Похожие на пример — только похожие на твои скрины\n"
@@ -1001,7 +1000,7 @@ def settings_view(chat_id):
     return settings_text(chat_id), settings_keyboard(chat_id)
 
 
-COINS_TEXT = ("🪙 Сколько самых торгуемых монет Binance проверять? Чем больше — тем дольше "
+COINS_TEXT = ("Сколько самых торгуемых монет Binance проверять? Чем больше — тем дольше "
               "сканирование, но больше находок.")
 
 
@@ -1014,7 +1013,7 @@ def coins_keyboard(chat_id):
     return {"inline_keyboard": [row, [{"text": "⬅️ К настройкам", "callback_data": "settings"}]]}
 
 
-TF_TEXT = "⏱ На каких таймфреймах искать? Нажимай, чтобы включить или выключить:"
+TF_TEXT = "На каких таймфреймах искать? Нажимай, чтобы включить или выключить:"
 
 
 def interval_keyboard(chat_id):
@@ -1087,7 +1086,7 @@ def flip_direction(chat_id, message_id, pattern_id):
     edit_keyboard(chat_id, message_id, {"inline_keyboard": [
         [{"text": f"✅ Запомнил: {word}", "callback_data": f"ok:{pattern_id}"}],
         [{"text": "✏️ Описать словами", "callback_data": f"describe:{pattern_id}"}]]})
-    send_message(f"🔄 Понял, это {word} «{example['name']}». Буду искать такие.", chat_id,
+    send_message(f"Понял, это {word} «{example['name']}». Буду искать такие.", chat_id,
                  saved_keyboard(ALL_PATTERNS.index(example["name"])) if example["name"] in ALL_PATTERNS
                  else {"inline_keyboard": [[TO_MENU]]})
 
@@ -1207,7 +1206,7 @@ def receive_description(chat_id, pattern_id, text):
          {"text": "📂 Мои паттерны", "callback_data": "my"}],
         [{"text": "🔍 Сканировать", "callback_data": "scan"}, TO_MENU]]}
     if language.is_empty(spec):
-        send_message("🤔 Не нашёл в описании условий, которые умею проверять. "
+        send_message("Не нашёл в описании условий, которые умею проверять. "
                      + (f"Не понял: {'; '.join(spec['unknown'][:4])}.\n\n" if spec["unknown"] else "\n")
                      + DESCRIBE_TEXT, chat_id, keyboard)
         return
@@ -1231,9 +1230,9 @@ def explain(chat_id, wish):
         opened = "gal" if examples_of(chat_id, index) else "pick"
         rows = [[{"text": f"🧩 Открыть «{name}»", "callback_data": f"{opened}:{index}" + (":0" if opened == "gal" else "")},
                  {"text": "👀 Пример с рынка", "callback_data": f"demo:{index}"}], [TO_MENU]]
-        send_message(f"🧩 {name}\n\n{PATTERN_INFO[name]}", chat_id, {"inline_keyboard": rows})
+        send_message(f"{name}\n\n{PATTERN_INFO[name]}", chat_id, {"inline_keyboard": rows})
     else:
-        send_message(f"📖 {GLOSSARY[term]}", chat_id, {"inline_keyboard": [[TO_MENU]]})
+        send_message(f"{GLOSSARY[term]}", chat_id, {"inline_keyboard": [[TO_MENU]]})
 
 
 def quick_reply(chat_id, wish):
@@ -1304,7 +1303,7 @@ def free_text(chat_id, text):
     elif kind == "question":
         reply = brain.answer(text)
         if reply:
-            send_message("🧠 " + reply, chat_id, {"inline_keyboard": [[TO_MENU]]})
+            send_message(reply, chat_id, {"inline_keyboard": [[TO_MENU]]})
         elif not (quick and quick_reply(chat_id, quick)):
             show_menu(chat_id)
     elif kind == "scan":
@@ -1336,7 +1335,7 @@ def brain_allowed(chat_id, now=None):
 def brain_notice(chat_id, text):
     """«Думаю…» — и честно про очередь, если нейросеть сейчас занята другим."""
     if brain.busy():
-        send_message("🧠 Нейросеть сейчас отвечает другому — ты следующий, это займёт чуть дольше.", chat_id)
+        send_message("Нейросеть сейчас отвечает другому — ты следующий, это займёт чуть дольше.", chat_id)
     elif text:
         send_message(text, chat_id)
 
@@ -1359,7 +1358,7 @@ def describe_pattern(chat_id, name, text):
         brain_notice(chat_id, f"🧠 Думаю над описанием «{name}»…")
     spec = language.understand(text, name, smart=smart)
     if language.is_empty(spec):
-        send_message(f"🤔 Понял, что это про «{name}», но не нашёл условий, которые умею проверять.\n\n"
+        send_message(f"Понял, что это про «{name}», но не нашёл условий, которые умею проверять.\n\n"
                      + DESCRIBE_TEXT, chat_id, keyboard)
         return
     for example in examples:
@@ -1389,7 +1388,7 @@ def receive_example(chat_id, name, path):
     if fp is None:
         pattern_id = add_pattern(chat_id, name, path, note="скрин без отпечатка")
         seen = f"вижу {len(candles)} свечей, но" if candles is not None else "не смог прочитать свечи, и"
-        send_message(f"😕 На скрине {seen} не нашёл «{name}» по правилу:\n{PATTERN_INFO[name]}\n\n"
+        send_message(f"На скрине {seen} не нашёл «{name}» по правилу:\n{PATTERN_INFO[name]}\n\n"
                      "Скрин сохранил, но сравнивать с ним находки не смогу. Лучше пришли другой: "
                      "свечи крупно, видно 20–30 свечей до паттерна и несколько после, без индикаторов "
                      "(объём снизу — можно, я его прочитаю).", chat_id,
@@ -1464,7 +1463,7 @@ def receive_pattern_photo(chat_id, name, file_id, caption=""):
     analysis = analyze_screenshot(path)
     if not analysis.ok:
         remove_file(path)
-        send_message("Не смог разобрать график на картинке 😕\n\n" + TIPS, chat_id, retry_keyboard(index))
+        send_message("Не смог разобрать график на картинке.\n\n" + TIPS, chat_id, retry_keyboard(index))
         return
 
     lines_text = describe_lines(analysis.lines)
@@ -1502,8 +1501,8 @@ def send_welcome(chat_id):
     st = billing.status(chat_id)
     gift = ""
     if st["trial"] and st["pro"]:
-        gift = (f"\n\n🎁 Тебе {billing.TRIAL_DAYS} дней Pro бесплатно (до {billing.until_text(st['until'])}): "
-                "все паттерны, автоскан, нейросеть. Потом — Free или «💎 Подписка».")
+        gift = (f"\n\nПервые {billing.TRIAL_DAYS} дня — Pro бесплатно (до {billing.until_text(st['until'])}): "
+                "все паттерны, автоскан, нейросеть. Потом Free или подписка.")
     send_message(WELCOME + gift, chat_id, WELCOME_KEYBOARD)
 
 
@@ -1654,11 +1653,11 @@ def record_vote(chat_id, coin, index, vote, quiet=False):
     lines = [head]
     changes = what_changed(before, after, vote)
     if changes:
-        lines.append("🎯 Переучился по твоим оценкам:\n• " + "\n• ".join(changes))
+        lines.append("Переучился по твоим оценкам:\n• " + "\n• ".join(changes))
     if after["rules"] and after["rules"] != before["rules"]:
-        lines.append("🎯 Присылаю только: " + "; ".join(rule_text(r) for r in after["rules"]))
+        lines.append("Присылаю только: " + "; ".join(rule_text(r) for r in after["rules"]))
     if after.get("head") and not before.get("head"):
-        lines.append("🧠 Запомнил, как выглядят находки, которые тебе нравятся, — отбор учитывает и вид.")
+        lines.append("Запомнил, как выглядят находки, которые тебе нравятся, — отбор учитывает и вид.")
     if not changes and len(after["records"]) < 6:
         likes = sum(r["vote"] > 0 for r in after["records"])
         lines.append(f"Оценок по «{name}»: 👍 {likes}, 👎 {len(after['records']) - likes}. "
@@ -1712,7 +1711,7 @@ def vote_card(chat_id, card_id, vote, message_id=None):
             keyboard = {"inline_keyboard": [[{"text": "💾 Сохранить как пример", "callback_data": f"ex:{card_id}:0"}]]}
         send_message(text, chat_id, keyboard)
         return
-    send_message(f"⭐ {coin['symbol']}: оцени каждую находку отдельно —\n"
+    send_message(f"{coin['symbol']}: оцени каждую находку отдельно —\n"
                  "👍 подходит, 👎 не то, 💾 сохранить как пример паттерна.",
                  chat_id, rating_keyboard(chat_id, card_id, coin))
 
@@ -1752,7 +1751,7 @@ def save_example(chat_id, card_id, index):
     if index_name is not None:
         keyboard = {"inline_keyboard": [[{"text": "🖼 Посмотреть примеры", "callback_data": f"gal:{index_name}:{count - 1}"},
                                          CLOSE]]}
-    send_message(f"💾 Сохранил как пример №{count} к «{item['name']}». Теперь ищу и похожие на него.",
+    send_message(f"Сохранил как пример №{count} к «{item['name']}». Теперь ищу и похожие на него.",
                  chat_id, keyboard)
 
 
@@ -1810,7 +1809,7 @@ def show_patterns(chat_id, card_id, reply_to=None):
     if coin is None:
         outdated(chat_id)
         return
-    send_message(f"🧩 {coin['symbol']}: что нанести на график TradingView?\n"
+    send_message(f"{coin['symbol']}: что нанести на график TradingView?\n"
                  "Сними галочки с лишнего и нажми «Разметка выбранного».",
                  chat_id, patterns_keyboard(chat_id, card_id, coin), reply_to=reply_to)
 
@@ -1839,7 +1838,7 @@ def send_markup(chat_id, coin, groups, code, filename, reply_to, **help_options)
     в подписи — что на графике, под файлом — ссылки на TradingView и меню."""
     intervals = list(dict.fromkeys(g[3] for g in groups if len(g) == 4)) or [coin["frames"][0]["interval"]]
     first = intervals[0]
-    caption = f"📈 {coin['symbol']} — разметка для TradingView\n" + pine_help(
+    caption = f"{coin['symbol']} — разметка для TradingView\n" + pine_help(
         coin["symbol"], first, groups, howto=False, **help_options)
     path = f"pine_{chat_id}_{int(time.time() * 1000)}.txt"
     with open(path, "w", encoding="utf-8") as f:
@@ -1876,7 +1875,7 @@ def send_selected_pine(chat_id, card_id, reply_to=None):
     sel = selection(chat_id, card_id)
     chosen = [entry for i, entry in enumerate(coin_items(coin)) if i not in sel["off"]]
     if not chosen:
-        send_message("Ничего не выбрано — отметь хотя бы один паттерн ✅", chat_id)
+        send_message("Ничего не выбрано — отметь хотя бы один паттерн.", chat_id)
         return
     send_action(chat_id)                         # «отправляет файл…» вверху чата
     groups = selected_markup(search_patterns(chat_id), coin, chosen, get_settings(chat_id))
@@ -1928,15 +1927,15 @@ def coin_line(coin, limit=90):
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
-def results_title(coins, head="🔍 Нашлось"):
+def results_title(coins, head="Нашлось"):
     """Заголовок списка: сколько монет и что в них особенного."""
     combos = sum(any(len(f["items"]) > 1 for f in c["frames"]) for c in coins)
     multi = sum(len(c["frames"]) > 1 for c in coins)
     linked = sum(confluence_score(c.get("confluence", [])) > 0 for c in coins)
     title = f"{head} на {plural(len(coins), 'монете', 'монетах', 'монетах')}"
-    extras = [f"🔗 совпадения ТФ: {linked}"] if linked else []
+    extras = [f"совпадения ТФ: {linked}"] if linked else []
     if combos:
-        extras.append(f"🔥 комбинации: {combos}")
+        extras.append(f"комбинации: {combos}")
     if multi:
         extras.append(f"на нескольких ТФ: {multi}")
     return title + (" (" + ", ".join(extras) + ")" if extras else "")
@@ -2139,7 +2138,7 @@ def find_coin(chat_id, query):
     if len(similar) > 1:
         buttons = [{"text": s.removesuffix("USDT"), "callback_data": f"v:{cid}"}
                    for s, cid in list(similar.items())[:FIND_BUTTONS]]
-        send_message("🔎 Похожие монеты в последних результатах:", chat_id,
+        send_message("Похожие монеты в последних результатах:", chat_id,
                      {"inline_keyboard": _grid(buttons, 4) + [[HOME]]})
         return
     if len(similar) == 1:
@@ -2157,11 +2156,11 @@ def check_coin(chat_id, symbol):
         return
     intervals = get_intervals(chat_id)
     if not get_candles(symbol, intervals[0], 5):
-        send_message(f"Не нашёл {symbol} на Binance 😕 Проверь тикер (нужна пара к USDT).", chat_id,
+        send_message(f"Не нашёл {symbol} на Binance. Проверь тикер (нужна пара к USDT).", chat_id,
                      {"inline_keyboard": [[TO_MENU]]})
         return
     tfs = ", ".join(i.upper() for i in intervals)
-    wait_id = send_message(f"🔎 В последних результатах {symbol} нет — проверяю сейчас ({tfs})…", chat_id)
+    wait_id = send_message(f"В последних результатах {symbol} нет — проверяю сейчас ({tfs})…", chat_id)
     # при поиске конкретной монеты показываем всё, что на ней есть: без «только комбинации»
     settings = {**get_settings(chat_id), "combos_only": False}
     cards, _ = scan_user(search_patterns(chat_id, patterns), intervals, symbols=[symbol], settings=settings,
@@ -2192,7 +2191,7 @@ def run_scan(chat_id):
     intervals = get_intervals(chat_id)
     tfs = ", ".join(i.upper() for i in intervals)
     coins = get_coins(chat_id)
-    wait_id = send_message(f"🔍 Сканирую топ-{coins} монет ({tfs}), {wait_text(coins, intervals)}…", chat_id)
+    wait_id = send_message(f"Сканирую топ-{coins} монет ({tfs}), {wait_text(coins, intervals)}…", chat_id)
     settings = get_settings(chat_id)
     cards, skipped = scan_user(search_patterns(chat_id, patterns), intervals, symbols=top_symbols(coins), settings=settings,
                                judge=user_judge(chat_id, settings))
@@ -2231,11 +2230,11 @@ def run_history(chat_id):
         return
     intervals = get_intervals(chat_id)
     coins = get_coins(chat_id)
-    wait_id = send_message(f"📊 Считаю историю по топ-{coins} монет, {wait_text(coins * 2, intervals)}…", chat_id)
+    wait_id = send_message(f"Считаю историю по топ-{coins} монет, {wait_text(coins * 2, intervals)}…", chat_id)
     reports, cards, skipped = history_user(search_patterns(chat_id, patterns), intervals, symbols=top_symbols(coins),
                                            settings=get_settings(chat_id))
     report_skipped(chat_id, skipped)
-    say(chat_id, wait_id, f"📊 История по топ-{coins} монет готова 👇")
+    say(chat_id, wait_id, f"История по топ-{coins} монет готова.")
     for report in reports:
         for part in split_text(report):
             send_message(part, chat_id)
@@ -2381,7 +2380,7 @@ def handle_callback(query):
         edit_keyboard(chat_id, message_id, settings_keyboard(chat_id))
         searchable = {p["name"] for p in get_patterns(chat_id) if p["name"] in SEARCHABLE}
         if value == "combos_only" and settings["combos_only"] and len(searchable) < 2:
-            send_message("⚠️ Для комбинаций нужно минимум 2 разных паттерна — сейчас находок не будет. "
+            send_message("Для комбинаций нужно минимум 2 разных паттерна — сейчас находок не будет. "
                          "Добавь ещё паттерн в «📂 Мои паттерны».", chat_id, {"inline_keyboard": [[CLOSE]]})
         return
 
@@ -2516,7 +2515,7 @@ def handle_callback(query):
         if pattern is None or pattern["name"] not in ALL_PATTERNS:
             show_menu(chat_id)
             return
-        send_message(f"✅ Сохранил «{pattern['name']}». Добавь ещё пример или запускай поиск.",
+        send_message(f"Сохранил «{pattern['name']}». Добавь ещё пример или запускай поиск.",
                      chat_id, saved_keyboard(ALL_PATTERNS.index(pattern["name"])))
         return
 
@@ -2596,7 +2595,7 @@ def network_wait(failures):
 def network_hint(error, failures, wait):
     """Короткое сообщение об ошибке сети — без токена и с подсказкой, что делать."""
     kind = error.__class__.__name__
-    text = f"⚠️ Нет связи с Telegram ({kind}), попытка {failures}, жду {wait} с."
+    text = f"Нет связи с Telegram ({kind}), попытка {failures}, жду {wait} с."
     if failures == 1:
         text += ("\n   Бот сам переподключится. Если это надолго: проверь интернет / VPN; "
                  "если api.telegram.org заблокирован — впиши прокси в .env: TELEGRAM_PROXY=http://адрес:порт")
