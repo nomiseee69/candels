@@ -45,7 +45,22 @@ def reference_from_screenshot(path):
     return reference_from_analysis(analysis)
 
 
-def reference_from_analysis(analysis):
+def _visible_span(upper, lower, first, last):
+    """Both boundaries and a price series must exist over the same interval."""
+    left = max(upper[0], lower[0], first)
+    right = min(upper[2], lower[2], last)
+    if right <= left:
+        return None
+    gap = _value(upper, left) - _value(lower, left)
+    end_gap = _value(upper, right) - _value(lower, right)
+    if gap <= 0:
+        return None
+    if end_gap < 0:
+        right = left + (right - left) * gap / (gap - end_gap)
+    return left, right
+
+
+def reference_from_analysis(analysis, *, visible_span=False):
     """Геометрия и путь цены из уже разобранного изображения."""
     if not analysis.ok or len(analysis.lines) != 2:
         return None
@@ -56,8 +71,13 @@ def reference_from_analysis(analysis):
         return None
     # на картинке y растёт вниз — переворачиваем, чтобы «вверх» было «дороже»
     lines = [(ln.x1, h - 1 - ln.y1, ln.x2, h - 1 - ln.y2) for ln in analysis.lines]
-    middle = (left + right) / 2
-    upper, lower = sorted(lines, key=lambda ln: _value(ln, middle), reverse=True)
+    order_at = max(ln[0] for ln in lines) if visible_span else (left + right) / 2
+    upper, lower = sorted(lines, key=lambda ln: _value(ln, order_at), reverse=True)
+    if visible_span:
+        span = _visible_span(upper, lower, analysis.xs[0], analysis.xs[-1])
+        if span is None or span[1] - span[0] < 10:
+            return None
+        left, right = span
     geometry = _unit_box(upper, lower, left, right)
     if geometry is None:
         return None
@@ -65,15 +85,27 @@ def reference_from_analysis(analysis):
     path = None
     if inside.sum() >= 10:
         path = normalize(resample(analysis.prices[inside], PATH_POINTS))
-    return {"geometry": geometry, "path": path}
+    elif visible_span:
+        return None
+    reference = {"geometry": geometry, "path": path}
+    if visible_span:
+        reference["visible_span"] = True
+    return reference
 
 
-def figure_shape(df, item):
+def figure_shape(df, item, *, visible_span=False):
     """То же для фигуры на рынке: геометрия линий и путь цены (close) внутри неё."""
     left = min(item["upper"][0], item["lower"][0])
     right = item["upper"][2]
+    if visible_span:
+        span = _visible_span(item["upper"], item["lower"], 0, len(df) - 1)
+        if span is None:
+            return {"geometry": None, "path": None}
+        left, right = span
     geometry = _unit_box(item["upper"], item["lower"], left, right)
     closes = df["close"].to_numpy()[int(left):int(right) + 1]
+    if visible_span and len(closes) < 5:
+        return {"geometry": None, "path": None}
     path = normalize(resample(closes, PATH_POINTS)) if len(closes) >= 5 else None
     return {"geometry": geometry, "path": path}
 
@@ -93,8 +125,17 @@ def compare(reference, figure):
 
 def best_match(df, item, references):
     """Самый похожий из примеров пользователя: (похожесть, номер примера) или (None, None)."""
-    figure = figure_shape(df, item)
-    scored = [(s, i) for i, s in enumerate(compare(ref, figure) for ref in references) if s is not None]
+    shapes = {}
+    scored = []
+    for i, ref in enumerate(references):
+        if ref is None:
+            continue
+        visible = bool(ref.get("visible_span"))
+        if visible not in shapes:
+            shapes[visible] = figure_shape(df, item, visible_span=visible)
+        score = compare(ref, shapes[visible])
+        if score is not None:
+            scored.append((score, i))
     return max(scored) if scored else (None, None)
 
 
@@ -106,7 +147,7 @@ def best_similarity(df, item, references):
 def reference_to_json(reference):
     """Эталон → обычные списки, чтобы сохранить в users.json."""
     path = reference["path"]
-    return {"geometry": list(map(float, reference["geometry"])),
+    return {**reference, "geometry": list(map(float, reference["geometry"])),
             "path": None if path is None else [float(v) for v in path]}
 
 

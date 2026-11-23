@@ -26,8 +26,8 @@ from blocks import all_blocks, volume_ratios
 from flags import find_flag, history_flags
 from ranges import EDGE, find_range, history_ranges, volume_profile
 from trendlines import pivot_highs, pivot_lows
-from smc import find_all_fvg
-from structure import atr, equal_levels, structure_events
+from smc import BREAK_REACH, find_all_fvg
+from structure import SWING_WINDOW, atr, equal_levels, structure_events
 import visual
 from blocks import BLOCK_NAMES
 from flags import NAMES as FLAG_NAMES
@@ -205,6 +205,40 @@ def make_fingerprint(name, df, item):
     family = FAMILY[name]
     return {"family": family, "kind": item.get("kind"), "bullish": is_bullish(item),
             "features": features_of(family, df, item), "window": _window(df, item)}
+
+
+def visible_fvg_reference(fp, df, item):
+    """Restrict a photo query to observations present in the chart, before market matching."""
+    features = fp["features"].copy()
+    if "volume" not in df and item.get("impulse_and_wide"):
+        # A visible failed break still disproves significance without volume.
+        # Otherwise the predecessor swing or confirmation may be off-screen.
+        prefix = df.iloc[:item["start"] + 2]
+        swings = (pivot_highs(prefix.high.tolist(), SWING_WINDOW) if is_bullish(item)
+                  else pivot_lows(prefix.low.tolist(), SWING_WINDOW))
+        if item.get("significant") or not swings or item["end"] + BREAK_REACH >= len(df):
+            features.pop("significant", None)
+    window = fp["window"]
+    bounds = df.attrs.get("price_pixel_bounds")
+    if window is not None and bounds is not None:
+        start, end = item["start"], item["end"]
+        lo = start - window["start"]
+        ohlc = window["ohlc"]
+        cut = ((df.low <= bounds[0]) | (df.high >= bounds[1])).iloc[lo:lo + len(ohlc)].to_numpy()
+        left, right = window["start"], window["end"]
+        if cut[left:right + 1].any():
+            # The pictured triplet has an unknown outline. Retain its measured
+            # gap and impulse, but never compare this silhouette as complete.
+            window = None
+            if df.open.iloc[start + 1] in bounds or df.close.iloc[start + 1] in bounds:
+                return None  # impulse body also clipped: too little independent evidence
+        elif cut.any():
+            before = np.flatnonzero(cut[:left])
+            after = np.flatnonzero(cut[right + 1:])
+            first = int(before[-1] + 1) if len(before) else 0
+            last = int(right + 1 + after[0]) if len(after) else len(ohlc)
+            window = {"start": left - first, "end": right - first, "ohlc": ohlc[first:last]}
+    return {**fp, "features": features, "window": window}
 
 
 ZONE_BONUS = 6.0               # паттерн совпал с зоной, которую ты закрасил, — это точно он

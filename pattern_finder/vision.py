@@ -2144,6 +2144,7 @@ def _extract_prepared_marks(prepared, include_x=False):
         if not same:                              # рамка уже найденной залитой зоны — не вторая зона
             zones.append(extra)
     cols = ["open_time", "open", "high", "low", "close"] + (["volume"] if "volume" in df else [])
+    df.attrs["price_pixel_bounds"] = (0, h - 1)
     return df[cols + (["x"] if include_x else [])], zones, marks
 
 

@@ -261,7 +261,7 @@ def _still_inside(found, last_close):
 SIMILARITY_WEIGHT = 0.3     # насколько похожесть на пример пользователя влияет на выбор окна
 
 
-def find_line_pattern(df, family, preferred=None, windows=WINDOWS, similarity=None, extra=None):
+def find_line_pattern(df, family, preferred=None, windows=WINDOWS, similarity=None, extra=None, accept=None):
     """Лучшая фигура нужного семейства, которая формируется прямо сейчас (или None).
 
     family — набор типов (TRIANGLES, WEDGES, CHANNELS);
@@ -290,6 +290,8 @@ def find_line_pattern(df, family, preferred=None, windows=WINDOWS, similarity=No
         shift(found, len(df) - w)         # фигура начинается с первого касания линий
         if similarity is not None:
             found["similarity"] = similarity(df, found)
+        if accept is not None and not accept(found):
+            continue
         # при почти равной оценке лучше длинное окно — оно захватывает фигуру целиком
         found["_rank"] = (found["score"] + 0.0005 * found["window"]
                           + SIMILARITY_WEIGHT * (found.get("similarity") or 0)

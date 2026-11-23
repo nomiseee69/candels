@@ -129,7 +129,7 @@ def find_shape(df, shapes, builtin=None, name=None, extra=None):
     return best
 
 
-def find_lines(df, pattern_name, preferred_kind, references=(), similar_only=False, specs=()):
+def find_lines(df, pattern_name, preferred_kind, references=(), similar_only=False, specs=(), photo_kind=None):
     """Треугольник / клин / канал по линиям тренда, формирующийся прямо сейчас.
     references — эталоны с рисунков пользователя: считаем «похоже на твой пример»;
     similar_only — не присылать фигуры, похожие меньше чем на 60%;
@@ -143,17 +143,23 @@ def find_lines(df, pattern_name, preferred_kind, references=(), similar_only=Fal
     def described(d, figure):
         fits, extra = language.check_any(specs, d, figure)
         return (10 if fits else 0) + 0.5 * extra
-    found = find_line_pattern(df, FAMILY_BY_PATTERN[pattern_name], preferred_kind, similarity=compare,
-                              extra=described if specs else None)
+    family = FAMILY_BY_PATTERN[pattern_name]
+    accept = None
+    if photo_kind:
+        family = family.intersection({photo_kind})
+        def accept(item):
+            return item["score"] >= MIN_SCORE and (item.get("similarity") or 0) >= SIMILAR_ENOUGH
+    found = find_line_pattern(df, family, preferred_kind, similarity=compare,
+                              extra=described if specs else None, accept=accept)
     if wants_breakout(specs) and (found is None or not language.check_any(specs, df, dict(found))[0]):
         # в описании «пробой подтверждён / ретест» — берём фигуру, которую пробили недавно
         n = len(df)
-        recent = [f for f in history_lines(df, FAMILY_BY_PATTERN[pattern_name], LINE_WINDOWS, MIN_SCORE)
+        recent = [f for f in history_lines(df, family, LINE_WINDOWS, MIN_SCORE)
                   if max(f["upper"][2], f["lower"][2]) >= n - 1 - AFTER_BREAKOUT and f.get("breakout")]
         for f in recent:
             if compare:
                 f["similarity"] = compare(df, f)
-        recent = [f for f in recent if language.check_any(specs, df, dict(f))[0]]
+        recent = [f for f in recent if (accept is None or accept(f)) and language.check_any(specs, df, dict(f))[0]]
         if recent:
             found = max(recent, key=lambda f: f["score"] + 0.3 * (f.get("similarity") or 0))
             found["window"] = n - found["start"]
@@ -184,7 +190,13 @@ def find_rule(df, pattern_name, settings=None, fingerprints=(), specs=()):
             fits, extra = language.check_any(specs, df, item)
             return (10 if fits else 0) + 0.5 * extra + base(item)
     if pattern_name == "FVG":
-        found = find_fvg(df, significant_only=_significant(settings), choose=choose)
+        photo_kind = (settings or {}).get("photo_kind")
+        accept = None
+        if photo_kind:
+            def accept(item):
+                return (item["kind"] == photo_kind and item["score"] >= MIN_SCORE
+                        and similar is not None and similar(item) >= SIMILAR_ENOUGH)
+        found = find_fvg(df, significant_only=_significant(settings), choose=choose, accept=accept)
     elif pattern_name in STRUCTURE_KIND:
         found = find_break(df, STRUCTURE_KIND[pattern_name], choose=choose)
     elif pattern_name in BLOCK_FAMILY:
@@ -276,8 +288,9 @@ def build_detectors(patterns, settings=None):
                                           if q["name"] == name and q.get("kind") == kind) if ref]
             similar_only = bool((settings or {}).get("similar_only"))
             specs = _specs(patterns, name)
+            photo_kind = (settings or {}).get("photo_kind")
             detectors.append((name, lambda df, n=name, k=kind, r=references, s=specs:
-                              rate(df, find_lines(df, n, k, r, similar_only, s))))
+                              rate(df, find_lines(df, n, k, r, similar_only, s, photo_kind))))
         elif name in FLAG_PATTERNS:
             fps = _fingerprints(patterns, name)
             bonus = spec_bonus(_specs(patterns, name))

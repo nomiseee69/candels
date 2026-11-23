@@ -2321,7 +2321,7 @@ def run_scan(chat_id, example=None, edit_id=None):
     wait_id = say(chat_id, edit_id, f"🔍 Сканирую топ-{coins} монет ({tfs}){target}, {wait_text(coins, intervals)}…")
     settings = get_settings(chat_id)
     if example:
-        settings = {**settings, "similar_only": True, "combos_only": False}
+        settings = {**settings, "similar_only": True, "combos_only": False, "photo_kind": example.get("kind")}
     else:
         patterns = search_patterns(chat_id, patterns)
     cards, skipped = scan_user(patterns, intervals, symbols=top_symbols(coins), settings=settings,

@@ -1,7 +1,7 @@
 """Разовые эталоны для поиска по фотографии в чате."""
 
 from catalog import SHAPE_PATTERNS
-from fingerprint import kind_text, make_fingerprint, marked_items
+from fingerprint import kind_text, make_fingerprint, marked_items, visible_fvg_reference
 from shape import SHAPE_POINTS, normalize, resample
 from shapes_check import validate
 from similarity import reference_from_analysis, reference_to_json
@@ -29,7 +29,7 @@ def screenshot_choices(path):
         if len(lines) == 2:
             analysis = analyze_screenshot(path)
             kind = kind_from_drawing(analysis.lines)
-            reference = reference_from_analysis(analysis)
+            reference = reference_from_analysis(analysis, visible_span=True)
             if reference and kind:
                 name = next((n for n, kinds in FAMILY_BY_PATTERN.items() if kind in kinds), None)
                 if name:
@@ -53,8 +53,13 @@ def screenshot_choices(path):
             label = kind_text({**item, "name": name})
             if len(zones) > 1:
                 label += f" · зона {pos + 1} слева"
+            fp = make_fingerprint(name, df, item)
+            if name == "FVG":
+                fp = visible_fvg_reference(fp, df, item)
+                if fp is None:
+                    continue
             choices.append((label, {"name": name, "kind": item.get("kind"), "direction": item.get("direction"),
-                                    "fingerprint": make_fingerprint(name, df, item)}))
+                                    "fingerprint": fp}))
     if not choices:
         raise UnreliableScreenshot("Свечи видны, но связать разметку с паттерном не удалось. "
                                    "Отметь границы одной фигуры или одну зону.")
