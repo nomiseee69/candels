@@ -6,6 +6,8 @@
 import itertools
 import re
 import os
+import secrets
+import tempfile
 import threading
 import time
 import traceback
@@ -34,12 +36,13 @@ from storage import (
     toggle_interval, toggle_setting,
 )
 from chart import plot_example, plot_findings
-from guide import COMMANDS, DEMO_LEGEND, GLOSSARY, PATTERN_INFO, WELCOME
+from guide import COMMANDS, DEMO_LEGEND, GLOSSARY, HELP_TEXT, PATTERN_INFO, SCREENSHOT_GUIDE, WELCOME
 from templates import template_shape
 from feedback import (MIN_VOTES_FIT, features, item_window, learn, make_judge, rule_text,
                       what_changed, with_learning)
 from feedback import summary as learning_summary
-from similarity import example_from_item
+from similarity import SIMILAR_ENOUGH, example_from_item
+from screenshot_query import screenshot_choices
 from fingerprint import FAMILY, describe as describe_fingerprint, kind_text, make_fingerprint, range_from_box, screenshot_fingerprint
 from vision import UnreliableScreenshot, extract_candles, extract_marks, extract_range
 import billing
@@ -244,21 +247,27 @@ def outdated(chat_id):
 
 # --- главное меню ----------------------------------------------------------------------------
 def menu_keyboard(chat_id=None):
-    """Главное меню — только действия, по два в ряд."""
-    auto_on = chat_id is not None and get_autoscan(chat_id)
-    pro = chat_id is None or billing.is_pro(chat_id)
     return {"inline_keyboard": [
-        [{"text": "🔍 Сканировать", "callback_data": "scan"},
-         {"text": "🔎 Найти монету", "callback_data": "find"}],
-        [{"text": "📂 Мои паттерны", "callback_data": "my"},
-         {"text": "📊 История", "callback_data": "history"}],
-        [{"text": "📚 Обучение", "callback_data": "learn"},
-         {"text": "⚙️ Настройки", "callback_data": "settings"}],
-        [{"text": ("🔔 Автоскан: вкл" if auto_on else "🔕 Автоскан: выкл") if pro else "🔒 Автоскан (Pro)",
-          "callback_data": "auto"},
-         {"text": "💎 Подписка", "callback_data": "sub"}],
-        [{"text": "👤 Профиль", "callback_data": "profile"}, {"text": "❓ Помощь", "callback_data": "help"}],
+        [{"text": "🔍 Поиск", "callback_data": "search"}, {"text": "📂 Мои паттерны", "callback_data": "my"}],
+        [{"text": "🔔 Автоскан", "callback_data": "auto_section"}, {"text": "👤 Профиль", "callback_data": "profile"}],
     ]}
+
+
+GUIDE_BUTTON = {"text": "📖 Как сделать скриншот", "callback_data": "tutorial:0"}
+SEARCH_VIEW = ("🔍 Отправь фото графика с выделенной фигурой или зоной прямо в этот чат.",
+               {"inline_keyboard": [[GUIDE_BUTTON],
+                [{"text": "🔍 По сохранённым паттернам", "callback_data": "scan"}],
+                [{"text": "🔎 Найти монету", "callback_data": "find"}, {"text": "📊 История", "callback_data": "history"}],
+                [TO_MENU]]})
+
+
+def autoscan_view(chat_id):
+    on = get_autoscan(chat_id)
+    action = "Выключить" if on else ("Включить" if billing.is_pro(chat_id) else "🔒 Включить с Pro")
+    return ("🔔 Автоскан " + ("включён" if on else "выключен") +
+            ". Проверяю сохранённые паттерны после закрытия свечи.",
+            {"inline_keyboard": [[{"text": action, "callback_data": "auto"}],
+                                 [{"text": "⚙️ Настройки", "callback_data": "settings"}], [TO_MENU]]})
 
 
 def menu_text(chat_id):
@@ -322,7 +331,9 @@ def profile_view(chat_id):
                   f"{billing.PLANS.get(p['plan'], (0, 0, 0, p['plan']))[3]}, "
                   + (f"⭐ {p['amount']:.0f}" if p["currency"] == "XTR" else f"{p['amount']:.0f} ₽") for p in paid]
     button = "💎 Продлить" if st["pro"] and not st["admin"] else "💎 Купить Pro"
-    rows = [[{"text": button, "callback_data": "sub"}]] if not st["admin"] else []
+    rows = [[{"text": button if not st["admin"] else "💎 Подписка", "callback_data": "sub"}],
+            [{"text": "⚙️ Настройки", "callback_data": "settings"}, {"text": "📚 Обучение", "callback_data": "learn"}],
+            [{"text": "❓ Помощь", "callback_data": "help"}]]
     return "\n".join(lines), {"inline_keyboard": rows + [[TO_MENU]]}
 
 
@@ -655,6 +666,7 @@ def broadcast(admin_id, text):
 
 def show_menu(chat_id, message_id=None, media=False):
     """Главное меню. message_id — открыть его на месте текущего сообщения."""
+    leave_photo_flow(chat_id)
     return show_view(chat_id, message_id, (menu_text(chat_id), menu_keyboard(chat_id)), media)
 
 
@@ -1502,8 +1514,80 @@ TICKER = re.compile(r"^[A-Za-z0-9]{2,15}(/?USDT)?$", re.IGNORECASE)
 
 
 WELCOME_KEYBOARD = {"inline_keyboard": [
-    [{"text": "📂 Выбрать паттерны", "callback_data": "my"}, {"text": "🔍 Сканировать", "callback_data": "scan"}],
-    [TO_MENU]]}
+    [GUIDE_BUTTON], *menu_keyboard()["inline_keyboard"]]}
+
+photo_queries = OrderedDict()
+photo_lock = threading.Lock()
+
+
+def leave_photo_flow(chat_id):
+    waiting.pop(chat_id, None)
+    describing.pop(chat_id, None)
+    with photo_lock:
+        photo_queries.pop(chat_id, None)
+
+
+def show_tutorial(chat_id, message_id, media, page):
+    _, filename, caption = SCREENSHOT_GUIDE[page]
+    path = os.path.join(os.path.dirname(__file__), "tests", "samples", filename)
+    tabs = [{"text": ("• " if index == page else "") + label, "callback_data": f"tutorial:{index}"}
+            for index, (label, _, _) in enumerate(SCREENSHOT_GUIDE)]
+    keyboard = {"inline_keyboard": [tabs, [{"text": "🔍 Поиск", "callback_data": "search"}, TO_MENU]]}
+    if media and edit_photo(chat_id, message_id, path, caption, keyboard):
+        return
+    sent = send_photo(path, caption, chat_id, keyboard)
+    if sent and message_id:
+        delete_message(chat_id, message_id)
+
+
+def inspect_chat_photo(chat_id, file_id):
+    token = secrets.token_hex(6)
+    with photo_lock:
+        photo_queries[chat_id] = (token, time.monotonic() + 1800, [])
+        photo_queries.move_to_end(chat_id)
+        if len(photo_queries) > 512:
+            photo_queries.popitem(last=False)
+    try:
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "chart.jpg")
+            download_photo(file_id, path)
+            choices = screenshot_choices(path)
+    except UnreliableScreenshot as error:
+        choices, reason = [], str(error)
+    except (ValueError, OSError) as error:
+        if isinstance(error, requests.RequestException):
+            raise
+        choices, reason = [], "Не удалось прочитать изображение. Пришли фото свечного графика."
+    with photo_lock:
+        current = photo_queries.get(chat_id)
+        if not current or current[0] != token:
+            return
+        if choices:
+            photo_queries[chat_id] = (token, current[1], choices)
+        else:
+            del photo_queries[chat_id]
+    if not choices:
+        send_message(reason, chat_id, {"inline_keyboard": [[GUIDE_BUTTON], [TO_MENU]]})
+        return
+    single = len(choices) == 1
+    text = f"Вижу {choices[0][0]}. Искать похожие графики?" if single else "Какой из отмеченных паттернов искать?"
+    rows = [[{"text": "🔍 Искать похожие" if single else label, "callback_data": f"query:{token}:{i}"}]
+            for i, (label, _) in enumerate(choices)]
+    send_message(text, chat_id, {"inline_keyboard": rows + [[GUIDE_BUTTON, TO_MENU]]})
+
+
+def confirm_chat_photo(chat_id, token, index, message_id):
+    with photo_lock:
+        query = photo_queries.get(chat_id)
+        valid = query and query[0] == token and query[1] > time.monotonic() and 0 <= index < len(query[2])
+        if valid:
+            _, example = query[2][index]
+            del photo_queries[chat_id]
+    if not valid:
+        show_view(chat_id, message_id, ("Эта кнопка устарела. Пришли скриншот для нового поиска.",
+                                        {"inline_keyboard": [[GUIDE_BUTTON], [TO_MENU]]}))
+        return
+    run_scan(chat_id, example, message_id)
 
 
 def send_welcome(chat_id):
@@ -1524,12 +1608,18 @@ def handle_command(chat_id, text):
     if command in ("/subscribe", "/plan"):
         show_view(chat_id, None, subscription_view(chat_id))
     elif command in ("/profile", "/me"):
+        leave_photo_flow(chat_id)
         show_view(chat_id, None, profile_view(chat_id))
-    elif command in ("/start", "/help"):
+    elif command == "/start":
+        leave_photo_flow(chat_id)
         send_welcome(chat_id)
+    elif command == "/help":
+        leave_photo_flow(chat_id)
+        show_view(chat_id, None, (HELP_TEXT, WELCOME_KEYBOARD))
     elif command == "/menu":
         show_menu(chat_id)
     elif command == "/patterns":
+        leave_photo_flow(chat_id)
         show_view(chat_id, None, my_patterns_view(chat_id))
     elif command == "/scan":
         start_job(chat_id, run_scan)
@@ -1587,8 +1677,8 @@ def handle_message(message):
         return
 
     if chat_id not in waiting:
-        send_message("Сначала выбери, какой это паттерн: «📂 Мои паттерны» → ➕ нужный паттерн.", chat_id,
-                     {"inline_keyboard": [[{"text": "📂 Мои паттерны", "callback_data": "my"}, TO_MENU]]})
+        describing.pop(chat_id, None)
+        start_job(chat_id, inspect_chat_photo, message["photo"][-1]["file_id"])
         return
 
     name = waiting.pop(chat_id)
@@ -1887,7 +1977,8 @@ def send_selected_pine(chat_id, card_id, reply_to=None):
         send_message("Ничего не выбрано — отметь хотя бы один паттерн.", chat_id)
         return
     send_action(chat_id)                         # «отправляет файл…» вверху чата
-    groups = selected_markup(search_patterns(chat_id), coin, chosen, get_settings(chat_id))
+    patterns = [coin["query_example"]] if "query_example" in coin else search_patterns(chat_id)
+    groups = selected_markup(patterns, coin, chosen, get_settings(chat_id))
     code = pine_script(coin["symbol"], chosen[0][0], groups, history_default=sel["history"])
     send_markup(chat_id, coin, groups, code, f"{coin['symbol']}_selected.pine.txt", reply_to,
                 selected=True, history_default=sel["history"])
@@ -1899,7 +1990,8 @@ def send_pine(chat_id, card_id, reply_to=None):
         outdated(chat_id)
         return
     send_action(chat_id)                         # «отправляет файл…» вверху чата
-    groups = full_markup(search_patterns(chat_id), coin, get_intervals(chat_id), get_settings(chat_id))
+    patterns = [coin["query_example"]] if "query_example" in coin else search_patterns(chat_id)
+    groups = full_markup(patterns, coin, get_intervals(chat_id), get_settings(chat_id))
     code = pine_script(coin["symbol"], coin["frames"][0]["interval"], groups)
     send_markup(chat_id, coin, groups, code, f"{coin['symbol']}_patterns.pine.txt", reply_to)
 
@@ -1983,7 +2075,7 @@ def card_keyboard(card_id, coin, chat_id=None):
         i, n = ids.index(card_id), len(ids)
         rows.append([{"text": "◀️", "callback_data": f"v:{ids[(i - 1) % n]}"},
                      {"text": f"{i + 1} / {n}", "callback_data": "noop"},
-                     {"text": "▶️", "callback_data": f"v:{ids[(i + 1) % n]}"}])
+                     {"text": "Далее ▶️", "callback_data": f"v:{ids[(i + 1) % n]}"}])
     pine = {"text": "📈 Разметка", "callback_data": f"pine:{card_id}"}
     detail = {"text": "📄 Подробно", "callback_data": f"det:{card_id}"}
     frames = coin.get("frames") or []
@@ -2004,7 +2096,7 @@ def card_keyboard(card_id, coin, chat_id=None):
             if market_example(df, item) is not None:
                 rows.append([{"text": "💾 Сохранить как пример", "callback_data": f"ex:{card_id}:0"}])
     bottom = [{"text": "📋 Список", "callback_data": f"list:{ids[0]}"}] if len(ids) > 1 else []
-    rows.append(bottom + [HOME])
+    rows.append(bottom + [{"text": "🔍 Новый поиск", "callback_data": "search"}, HOME])
     return {"inline_keyboard": rows}
 
 
@@ -2029,8 +2121,27 @@ def viewer_caption(coin, card_id):
             body = body[:CAPTION_LIMIT - len(head) - 40].rsplit("\n", 1)[0] + "\n…(всё — «📄 Подробно»)"
         return f"{head}\n{body}"
     lines = [head]
-    for f in coin["frames"]:                      # только ТФ и элементы анализа
+    for f in coin["frames"]:
         lines.append(f"{f['interval'].upper()}: " + ", ".join(dict.fromkeys(short_item(it) for it in f["items"])))
+    matches = [(f["interval"], item) for f in coin["frames"] for item in f["items"]]
+    if matches:
+        tf, item = max(matches, key=lambda pair: (pair[1].get("similarity") or 0, pair[1].get("score", 0)))
+        score = item.get("similarity")
+        if score is not None:
+            lines.append(f"Сходство с примером · {tf.upper()} · {score:.0%}")
+        reasons = strength.strongest(item, 2)
+        if not reasons and item.get("name") == "FVG":
+            reasons = ["между тенями первой и третьей свечи есть разрыв"]
+        elif not reasons and item.get("upper") is not None and item.get("lower") is not None:
+            reasons = [KIND_NAMES.get(item.get("kind"), "две границы фигуры")]
+            if isinstance(item.get("touches"), int):
+                reasons.append(plural(item["touches"], "касание", "касания", "касаний"))
+        elif not reasons and item.get("points"):
+            reasons = ["экстремумы образуют фигуру «" + item["name"] + "»"]
+        if not reasons and item.get("name") in PATTERN_INFO:
+            reasons = [PATTERN_INFO[item["name"]].split(". ")[0].rstrip(".")]
+        if reasons:
+            lines.append(f"Почему ({short_item(item)}, {tf.upper()}): " + ", ".join(reasons))
     caption = "\n".join(lines)
     if len(caption) > CAPTION_LIMIT:
         caption = caption[:CAPTION_LIMIT - 30].rsplit("\n", 1)[0] + "\n…(всё — «📄 Подробно»)"
@@ -2189,8 +2300,14 @@ NO_PATTERNS = ("Сначала добавь хотя бы один паттер�
                {"inline_keyboard": [[{"text": "📂 Мои паттерны", "callback_data": "my"}, TO_MENU]]})
 
 
-def run_scan(chat_id):
+def run_scan(chat_id, example=None, edit_id=None):
     patterns = get_patterns(chat_id)
+    if example:
+        allowed = billing.allowed_patterns(chat_id, [*patterns, example])
+        if not any(p is example for p in allowed):
+            paywall(chat_id, "patterns")
+            return
+        patterns = [example]
     if not patterns:
         send_message(NO_PATTERNS[0], chat_id, NO_PATTERNS[1])
         return
@@ -2200,12 +2317,30 @@ def run_scan(chat_id):
     intervals = get_intervals(chat_id)
     tfs = ", ".join(i.upper() for i in intervals)
     coins = get_coins(chat_id)
-    wait_id = send_message(f"🔍 Сканирую топ-{coins} монет ({tfs}), {wait_text(coins, intervals)}…", chat_id)
+    target = f" · {example['name']}" if example else ""
+    wait_id = say(chat_id, edit_id, f"🔍 Сканирую топ-{coins} монет ({tfs}){target}, {wait_text(coins, intervals)}…")
     settings = get_settings(chat_id)
-    cards, skipped = scan_user(search_patterns(chat_id, patterns), intervals, symbols=top_symbols(coins), settings=settings,
+    if example:
+        settings = {**settings, "similar_only": True, "combos_only": False}
+    else:
+        patterns = search_patterns(chat_id, patterns)
+    cards, skipped = scan_user(patterns, intervals, symbols=top_symbols(coins), settings=settings,
                                judge=user_judge(chat_id, settings))
+    if example:
+        # Один эталон даёт не больше одной находки на монету и таймфрейм.
+        matches = []
+        for card in cards:
+            item = card["items"][0]
+            if any(example.get(key) and item.get(key) != example[key] for key in ("kind", "direction")):
+                continue
+            if example.get("shape"):
+                item["similarity"] = item["score"]  # find_shape возвращает корреляцию с этим эталоном
+            if (item.get("similarity") or 0) >= SIMILAR_ENOUGH:
+                matches.append(card)
+        cards = matches
     report_skipped(chat_id, skipped)
-    again = {"inline_keyboard": [[{"text": "🔍 Ещё раз", "callback_data": "scan"},
+    again = {"inline_keyboard": [[{"text": "🔍 Новый поиск" if example else "🔍 Ещё раз",
+                                  "callback_data": "search" if example else "scan"},
                                   {"text": "⚙️ Настройки", "callback_data": "settings"}], [TO_MENU]]}
     if not cards:
         text = "Совпадений сейчас нет."
@@ -2214,6 +2349,9 @@ def run_scan(chat_id):
         say(chat_id, wait_id, text, again)
         return
     coins_found = group_by_coin(cards)
+    if example:
+        for coin in coins_found:
+            coin["query_example"] = example
     if settings.get("confluence_only"):
         coins_found = [c for c in coins_found if confluence_score(c["confluence"]) > 0]
         if not coins_found:
@@ -2285,6 +2423,23 @@ def handle_callback(query):
     if data == "noop":
         return
 
+    if data == "search":
+        leave_photo_flow(chat_id)
+        show_view(chat_id, message_id, SEARCH_VIEW, media)
+        return
+
+    if data.startswith("tutorial:"):
+        page = data.partition(":")[2]
+        if page.isdecimal() and int(page) < len(SCREENSHOT_GUIDE):
+            show_tutorial(chat_id, message_id, media, int(page))
+        return
+
+    if data.startswith("query:"):
+        parts = data.split(":")
+        if len(parts) == 3 and parts[2].isdecimal():
+            start_job(chat_id, confirm_chat_photo, parts[1], int(parts[2]), message_id)
+        return
+
     if data.startswith("adm:"):
         admin_callback(chat_id, message_id, data[4:], media)
         return
@@ -2302,7 +2457,7 @@ def handle_callback(query):
         return
 
     if data in ("my", "add", "cancel"):
-        waiting.pop(chat_id, None)
+        leave_photo_flow(chat_id)
         show_view(chat_id, message_id, my_patterns_view(chat_id), media)
         return
 
@@ -2344,6 +2499,7 @@ def handle_callback(query):
         return
 
     if data == "profile":
+        leave_photo_flow(chat_id)
         show_view(chat_id, message_id, profile_view(chat_id), media)
         return
 
@@ -2351,16 +2507,22 @@ def handle_callback(query):
         background(check_card_payments, chat_id)
         return
 
-    if data == "auto":                                  # меню обновляется на месте
+    if data == "auto_section":
+        leave_photo_flow(chat_id)
+        show_view(chat_id, message_id, autoscan_view(chat_id), media)
+        return
+
+    if data == "auto":
         if not get_autoscan(chat_id) and not billing.is_pro(chat_id):
             paywall(chat_id, "autoscan")
             return
         toggle_autoscan(chat_id)
-        show_menu(chat_id, message_id, media)
+        show_view(chat_id, message_id, autoscan_view(chat_id), media)
         return
 
     if data == "help":
-        show_view(chat_id, message_id, (WELCOME, WELCOME_KEYBOARD), media)
+        leave_photo_flow(chat_id)
+        show_view(chat_id, message_id, (HELP_TEXT, WELCOME_KEYBOARD), media)
         return
 
     if data == "sethelp":

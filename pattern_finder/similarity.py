@@ -42,6 +42,11 @@ def reference_from_screenshot(path):
         analysis = analyze_screenshot(path)
     except (OSError, ValueError):
         return None
+    return reference_from_analysis(analysis)
+
+
+def reference_from_analysis(analysis):
+    """Геометрия и путь цены из уже разобранного изображения."""
     if not analysis.ok or len(analysis.lines) != 2:
         return None
     h = analysis.height

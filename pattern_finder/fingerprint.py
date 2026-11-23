@@ -324,6 +324,16 @@ def _line_match(item, lines, df):
     return best
 
 
+def marked_items(name, df, zones, lines):
+    """Находки правила, совпавшие с разметкой по цене и времени."""
+    items = all_items(name, df)
+    for mark in zones or [None]:
+        ranked = [(float(_zone_match(item, mark) if mark else _line_match(item, lines, df)), item)
+                  for item in items]
+        if ranked:
+            yield max(ranked, key=lambda pair: pair[0])
+
+
 def item_from_line(name, df, line):
     """BOS / CHoCH / EQH / EQL прямо по нарисованной горизонтальной линии — если правило на свечах
     со скрина такой паттерн не нашло (свеч мало, свинг не подтверждён и т.п.)."""

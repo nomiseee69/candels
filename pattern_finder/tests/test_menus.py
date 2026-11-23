@@ -59,7 +59,7 @@ def use_storage(tmp_path):
 def test_main_menu_is_compact():
     names = [b["text"] for b in buttons(bot.menu_keyboard(1))]
     assert not set(names) & set(ALL_PATTERNS)
-    assert "📂 Мои паттерны" in names and "🔍 Сканировать" in names and "❓ Помощь" in names and "💎 Подписка" in names and "👤 Профиль" in names and len(names) == 10
+    assert names == ["🔍 Поиск", "📂 Мои паттерны", "🔔 Автоскан", "👤 Профиль"]
 
 
 def test_patterns_list_shows_all_and_pick_flow(tmp_path):
@@ -149,7 +149,7 @@ def test_settings_change_in_place(tmp_path):
         press("coins:100")
         assert storage.get_coins(5) == 100 and rec.edited[-1][0].startswith("⚙️ Настройки")
         press("auto")
-        assert rec.edited[-1][0].startswith("📈 Pattern Finder") and "Автоскан включён" in rec.edited[-1][0]
+        assert "Автоскан включён" in rec.edited[-1][0] and "auto" in datas(rec.edited[-1][1])
         assert not rec.sent                                              # ни одного нового сообщения
     finally:
         storage.FILE = original
@@ -282,7 +282,7 @@ def test_welcome_for_new_user_and_commands(tmp_path):
     bot.find_coin = lambda chat_id, query: jobs.append(("find", query))
     try:
         bot.handle_message({"chat": {"id": 9}, "text": "привет"})       # первое сообщение — приветствие
-        assert rec.sent[0][0].startswith("📈 Pattern Finder") and "скриншот" in rec.sent[0][0]
+        assert rec.sent[0][0].startswith(bot.WELCOME) and "tutorial:0" in datas(rec.sent[0][1])
         assert rec.sent[-1][0].startswith("📈 Pattern Finder")           # и меню
         count = len(rec.sent)
         bot.handle_message({"chat": {"id": 9}, "text": "привет"})       # второй раз — только меню
@@ -291,11 +291,11 @@ def test_welcome_for_new_user_and_commands(tmp_path):
         bot.handle_message({"chat": {"id": 9}, "text": "/find sol"})
         assert jobs == ["run_scan", ("find", "sol")]
         bot.handle_message({"chat": {"id": 9}, "text": "/help"})
-        assert rec.sent[-1][0].startswith("📈 Pattern Finder")
+        assert rec.sent[-1][0].startswith(bot.WELCOME)
         bot.handle_message({"chat": {"id": 9}, "text": "/patterns"})
         assert rec.sent[-1][0].startswith("📂")
         press("help", chat_id=9)
-        assert rec.edited[-1][0].startswith("📈 Pattern Finder")
+        assert rec.edited[-1][0].startswith(bot.WELCOME)
     finally:
         bot.start_job, bot.find_coin = saved
         storage.FILE = original

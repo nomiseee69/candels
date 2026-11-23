@@ -192,7 +192,7 @@ def test_bot_results_list_and_viewer():
         text, keyboard = bot.results_view(5, sid, 1)                                # вторая страница
         assert "16. 🔔 C15" in text and "стр. 2 / 2" in str(keyboard)
         viewer = bot.card_keyboard(card_id, bot.find_card(5, card_id), 5)["inline_keyboard"]
-        assert [b["text"] for b in viewer[0]] == ["◀️", "9 / 20", "▶️"]
+        assert [b["text"] for b in viewer[0]] == ["◀️", "9 / 20", "Далее ▶️"]
         assert viewer[-1][0]["callback_data"] == f"list:{sid}" and viewer[-1][-1]["callback_data"] == "home"
         assert bot.viewer_caption(bot.find_card(5, card_id), card_id).startswith("🔔 C8USDT · 9/20")
         bot.send_cards(5, coins[:1])                          # новое сканирование не ломает старые кнопки

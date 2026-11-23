@@ -151,6 +151,7 @@ def test_bot_payments_paywall_and_admin(tmp_path, monkeypatch):
     billing._links.clear()
     saved = billing.stars_links
     billing.stars_links = lambda api: {"month": "https://t.me/$m", "year": "https://t.me/$y"}
+    monkeypatch.setattr(bot, "api_post", lambda method, data: {"ok": True, "result": {"amount": 0}})
     try:
         now = time.time()
         storage.update_user(5, lambda u: u.update(sub={"trial_used": True, "until": now - 1}))
@@ -206,8 +207,8 @@ def test_free_profile_and_old_patterns(tmp_path, monkeypatch):
         text, _ = bot.profile_view(5)
         assert "Тариф: Free" in text and "Канал" in text and "Сканов сегодня осталось: 3 из 3" in text
         assert "Free" in bot.menu_text(5)
-        names = [b["text"] for row in bot.menu_keyboard(5)["inline_keyboard"] for b in row]
-        assert "🔒 Автоскан (Pro)" in names
+        names = [b["text"] for row in bot.autoscan_view(5)[1]["inline_keyboard"] for b in row]
+        assert "🔒 Включить с Pro" in names
         billing.extend(5, 30, source="stars")
         assert "осталось 30 дн." in bot.plan_line(5) and len(bot.search_patterns(5)) == 3
     finally:
