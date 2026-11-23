@@ -8,6 +8,7 @@
 """
 
 from dataclasses import dataclass, field
+from threading import local
 
 import cv2
 import numpy as np
@@ -388,6 +389,14 @@ def analyze_screenshot(path):
             mask = colored
         mask = keep_main_cluster(erase_dotted(mask))
         xs, prices = remove_spikes(*series_from_candles(mask))
+        # На графике с отдельной шкалой объёма проверяем тот же ряд, что и для SMC.
+        # Иначе запасной путь «форма графика» может принять отвергнутую реконструкцию.
+        volume_base = _colored_volume_base(img)
+        if volume_base is not None or len(lines) > 2:
+            candles, _, _ = extract_marks(path, include_x=True)
+            if volume_base is not None and candles is not None and not PANEL.cropped:
+                xs = xs[(xs >= candles.x.iloc[0]) & (xs <= candles.x.iloc[-1])]
+                prices = np.interp(xs, candles.x, candles.close)
         return Analysis("candles", xs, prices, lines, w, h, chain_from_lines(lines))
 
     # линейный график: «нарисованные линии» — это сама цена, их не стираем
@@ -1384,8 +1393,25 @@ def _own_columns(parts, xs, cols):
     return [parts[i] for i in keep], [xs[i] for i in keep]
 
 
+class UnreliableScreenshot(ValueError):
+    """Вместо эталона требуется уточнённый скриншот."""
+
+
+def _colored_volume_base(img):
+    """Общая нижняя граница ряда раздельных цветных вертикальных столбиков."""
+    h, w = img.shape[:2]
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    ink = ((hsv[..., 1] > 65) & (hsv[..., 2] > 45)).astype(np.uint8)
+    bars = cv2.morphologyEx(ink, cv2.MORPH_OPEN, np.ones((7, 1), np.uint8)).astype(bool)
+    ends = bars[:-1] & ~bars[1:]
+    counts = ends.sum(axis=1)
+    separate = (ends[:, 1:] & ~ends[:, :-1]).sum(axis=1)
+    candidates = np.flatnonzero((np.arange(h - 1) > 0.6 * h) & (counts > 0.08 * w) & (separate >= 12))
+    return int(candidates[np.argmax(counts[candidates])]) if len(candidates) else None
+
+
 def _candle_rows(img, mask, h, zone=CANDLE_ZONE, full=None):
-    hollow = PANEL.get("hollow")                       # внутренности пустых свечей (закрашены в _prepare)
+    hollow = PANEL.hollow                              # внутренности пустых свечей (закрашены в _prepare)
     known = hollow is not None and hollow.shape == mask.shape
     solid = cv2.bitwise_and(mask, cv2.bitwise_not(hollow)) if known else mask
     classes = ink_classes(img, solid)
@@ -1393,8 +1419,12 @@ def _candle_rows(img, mask, h, zone=CANDLE_ZONE, full=None):
     if foreign.any():                                  # цветное, но не цвета свечей — не свечи
         mask = mask.copy()
         mask[foreign] = 0
-    cols = _columns(mask, classes, h, zone, None if PANEL["cropped"] else _volume_base(mask, h))
-    groups = _resegment(cols, _groups(cols), PANEL.get("raw") if known else None)
+    colored_base = None if PANEL.cropped else _colored_volume_base(img)
+    base = colored_base
+    if base is None and not PANEL.cropped:
+        base = _volume_base(mask, h)
+    cols = _columns(mask, classes, h, zone, base)
+    groups = _resegment(cols, _groups(cols), PANEL.raw if known else None)
     chain = _chain(cols, groups, h)
     if chain is not None:
         rows = _drop_strays([_row(*_own_columns(parts, xs, cols), h, full) for parts, xs in chain])
@@ -1402,6 +1432,16 @@ def _candle_rows(img, mask, h, zone=CANDLE_ZONE, full=None):
         rows = [_row([cols[x] for x in g], g, h, full) for g in groups]
         rows = _drop_strays(_repick(rows, groups, cols, h, full))
     rows = _directions(rows, img, detect_background(img), h)
+    if colored_base is not None and len(rows) >= MIN_CANDLES:
+        # Скачок с цены на столбики или подписи у их основания выглядит как
+        # обвал и порождает ложные BOS/FVG. Один близкий к объёму фитиль допустим.
+        mid = np.array([h - 1 - (r["upper"] + r["lower"]) / 2 for r in rows])
+        steps = np.abs(np.diff(mid))
+        near_base = mid >= colored_base - 0.06 * h
+        for j in np.flatnonzero(steps > max(0.12 * h, 8 * np.median(steps))):
+            if near_base[j + 1:j + 5].sum() >= 3 or near_base[max(0, j - 3):j + 1].sum() >= 3:
+                raise UnreliableScreenshot("Не удалось отделить цену от панели объёма. "
+                                          "Увеличь один паттерн и пришли график без нижней панели и меток индикатора.")
     for r in rows:
         r.pop("cols", None)
     return rows
@@ -1919,17 +1959,24 @@ def _prepare(path, with_boxes=False):
                 lines += [ln for ln in (a, b) if ln not in lines]
     raw = erase_lines_by_color(img, fg, lines)
     solid = fill_hollow(raw)                      # пустые («hollow») свечи: тело — рамка, внутри фон
-    PANEL["hollow"] = cv2.bitwise_and(solid, cv2.bitwise_not(raw))
-    PANEL["raw"] = solid                          # до стирания пунктира: тут ещё видны крошечные доджи
+    PANEL.hollow = cv2.bitwise_and(solid, cv2.bitwise_not(raw))
+    PANEL.raw = solid                          # до стирания пунктира: тут ещё видны крошечные доджи
     mask = erase_dotted(solid)
-    PANEL["cropped"] = panel is not None
-    PANEL["lines"] = lines
+    PANEL.cropped = panel is not None
+    PANEL.lines = lines
     if with_boxes:
         return img, h, w, fg, mask, boxes
     return img, h, w, fg, mask
 
 
-PANEL = {"cropped": False, "lines": [], "hollow": None, "raw": None}   # вырезали ли главный график из рамки; нарисованные линии
+class _Panel(local):
+    cropped = False
+    lines = ()
+    hollow = None
+    raw = None
+
+
+PANEL = _Panel()   # каждый поток готовит собственное изображение
 
 
 def _has_volume(mask, h):
@@ -1953,7 +2000,7 @@ def _has_volume(mask, h):
 def _zone(mask=None, h=None):
     """Где кончаются свечи: внизу обычного скрина бывает объём, в вырезанной рамке — нет.
     Объёма не видно — свечи могут быть до самого низа картинки."""
-    if PANEL["cropped"]:
+    if PANEL.cropped:
         return 1.01
     if mask is not None and h is not None and not _has_volume(mask, h):
         return 1.01
@@ -1966,7 +2013,7 @@ def _colored(img, mask):
     Цветные свечи или чёрно-белые — решаем по «свечным» пикселям: вертикальным штрихам, которые
     не входят в широкие сплошные пятна. Текста, шкал и плашек на скрине бывает больше, чем свечей, —
     по всем пикселям сразу цветной график выглядел бы «серым»."""
-    hollow = PANEL.get("hollow")
+    hollow = PANEL.hollow
     holes = cv2.bitwise_and(hollow, mask) if hollow is not None and hollow.shape == mask.shape else np.zeros_like(mask)
     ink = cv2.bitwise_and(mask, cv2.bitwise_not(holes))
     colored = chroma_mask(img, detect_background(img)) & ink
@@ -2017,14 +2064,25 @@ def _wick_mask(mask, h):
     return mask
 
 
+def _near_price(df, start, end, bottom, top):
+    # У зоны должен быть ценовой контекст там, где она нарисована. Верхняя
+    # легенда может перекрывать свечи по X, но находится вне их диапазона по Y.
+    bars = df.iloc[max(0, start - 1):end + 2]
+    return bottom <= bars.high.max() and top >= bars.low.min()
+
+
 def _zones_on_candles(df, boxes, h):
     """Залитые прямоугольники → зоны на свечах: с какой свечи начинается, верх и низ (в «пикселях вверх»)."""
     zones = []
     xs = df["x"].to_numpy()
     for left, top, right, bottom, _ in boxes:
+        if right <= xs[0] or left >= xs[-1]:
+            continue
         inside = np.flatnonzero(xs >= left - 2)               # первая свеча у левого края зоны
         start = int(inside[0]) if len(inside) else len(xs) - 1
         end = int(np.argmin(np.abs(xs - right)))
+        if end <= start or not _near_price(df, start, end, h - 1 - bottom, h - 1 - top):
+            continue
         zones.append({"start": start, "end": max(start, end),
                       "top": float(h - 1 - top), "bottom": float(h - 1 - bottom)})
     return zones
@@ -2037,37 +2095,62 @@ def _lines_on_candles(df, lines, h):
     result = []
     for ln in lines:
         x0, x1 = np.interp([ln.x1, ln.x2], xs, index)
+        if x1 <= x0:
+            continue
         result.append({"x0": float(x0), "x1": float(x1), "y0": float(h - 1 - ln.y1), "y1": float(h - 1 - ln.y2),
                        "flat": abs(ln.angle) < 3})
     return result
 
 
-def extract_marks(path):
+def _check_target(df, lines, width, height):
+    """Несколько разных свингов размечены до пустого правого поля, поверх зигзага."""
+    last_x = df.x.iloc[-1]
+    levels = [ln for ln in lines if abs(ln.angle) < 3 and df.x.iloc[0] <= ln.x1 < last_x
+              and df.low.min() <= height - 1 - ln.y1 <= df.high.max()
+              and ln.x2 - last_x > 0.15 * width]
+    swings = [ln for ln in lines if abs(ln.angle) >= 3 and ln.x2 <= last_x]
+    if len(swings) < 3:
+        return
+    for i, a in enumerate(levels):
+        for b in levels[i + 1:]:
+            if abs(a.x1 - b.x1) > 0.05 * width and abs(a.y1 - b.y1) > np.median(df.high - df.low) * 2:
+                raise UnreliableScreenshot("Вижу несколько уровней и размеченных движений. "
+                                          "Оставь один нужный уровень или фигуру, увеличь участок и пришли скрин ещё раз.")
+
+
+def extract_marks(path, *, include_x=False):
     """Свечи и всё, что ты нарисовал на скрине, в координатах свечей:
     (свечи, закрашенные зоны, линии) — или (None, [], []), если свечей не видно."""
-    img, h, w, fg, mask, boxes = _prepare(path, with_boxes=True)
-    lines = PANEL["lines"]
+    return _extract_prepared_marks(_prepare(path, with_boxes=True), include_x)
+
+
+def _extract_prepared_marks(prepared, include_x=False):
+    img, h, w, fg, mask, boxes = prepared
+    lines = PANEL.lines
     if candle_ratio(mask) < CANDLE_MODE_RATIO:
         return None, [], []                                # линейный график — свечей нет
     rows = _drop_box_sides(_candle_rows(img, _colored(img, mask), h, _zone(mask, h), full=_wick_mask(mask, h)), boxes, h)
     if len(rows) < MIN_CANDLES:
         return None, [], []
     df = _to_frame(rows, h)
+    if len(df) < MIN_CANDLES:
+        return None, [], []
+    _check_target(df, lines, w, h)
     zones = _zones_on_candles(df, boxes, h)
     marks = _lines_on_candles(df, lines, h)
-    for extra in _zones_from_lines(marks, h):     # линии-границы зоны помечены "zone": True
+    for extra in _zones_from_lines(marks, h, df):     # линии-границы зоны помечены "zone": True
         same = any(abs(extra["start"] - z["start"]) <= 2 and min(extra["top"], z["top"]) - max(extra["bottom"], z["bottom"])
                    > 0.5 * (extra["top"] - extra["bottom"]) for z in zones)
         if not same:                              # рамка уже найденной залитой зоны — не вторая зона
             zones.append(extra)
     cols = ["open_time", "open", "high", "low", "close"] + (["volume"] if "volume" in df else [])
-    return df[cols], zones, marks
+    return df[cols + (["x"] if include_x else [])], zones, marks
 
 
-def _zones_from_lines(marks, h):
+def _zones_from_lines(marks, h, df):
     """Узкая зона, у которой заливка не видна, — это две горизонтальные линии одна над другой
     с общим началом и концом (верх и низ прямоугольника)."""
-    flat = [m for m in marks if m["flat"]]
+    flat = [m for m in marks if m["flat"] and m["x1"] - m["x0"] >= 1]
     zones = []
     for i, a in enumerate(flat):
         for b in flat[i + 1:]:
@@ -2075,9 +2158,13 @@ def _zones_from_lines(marks, h):
                 continue
             gap = abs(a["y0"] - b["y0"])
             if abs(a["x0"] - b["x0"]) <= 1.5 and abs(a["x1"] - b["x1"]) <= 2 and 3 <= gap <= 0.2 * h:
+                start = int(round(min(a["x0"], b["x0"])))
+                end = int(round(max(a["x1"], b["x1"])))
+                bottom, top = sorted((a["y0"], b["y0"]))
+                if not _near_price(df, start, end, bottom, top):
+                    continue
                 a["zone"] = b["zone"] = True
-                zones.append({"start": int(round(min(a["x0"], b["x0"]))), "end": int(round(max(a["x1"], b["x1"]))),
-                              "top": max(a["y0"], b["y0"]), "bottom": min(a["y0"], b["y0"])})
+                zones.append({"start": start, "end": end, "top": top, "bottom": bottom})
     return zones
 
 
@@ -2091,13 +2178,17 @@ def extract_range(path):
     """Скрин боковика, где ты НАРИСОВАЛ прямоугольник (и, может быть, профиль объёма с линией POC):
     (свечи, боковик) или (свечи, None), если прямоугольника нет. Боковик — номера первой и последней
     свечи внутри прямоугольника, верх и низ (в тех же «пикселях вверх», что и свечи) и POC."""
-    img, h, w, fg, mask, boxes = _prepare(path, with_boxes=True)
+    prepared = _prepare(path, with_boxes=True)
+    img, h, w, fg, mask, boxes = prepared
+    # Проверяем исходную разметку до стирания горизонталей: иначе две
+    # отдельные проекции уровней могут превратиться в один «боковик».
+    candles, _, _ = _extract_prepared_marks(prepared)
     box = _box_lines(fg, w, h)
     if box is None and boxes:                    # прямоугольник с заливкой: рамку стёрли вместе с ней
         left, top, right, bottom, _ = max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
         box = (top, bottom, left, right)
     if box is None:
-        return extract_candles(path), None
+        return candles, None
     top, bottom, left, right = box
     poc_y = _poc_row(fg, box)
     # профиль объёма и линия POC — горизонтальные полосы: стираем их, чтобы не спутать со свечами
@@ -2114,8 +2205,11 @@ def extract_range(path):
     if len(rows) < MIN_CANDLES:
         return None, None
     df = _to_frame(rows, h)
+    if len(df) < MIN_CANDLES:
+        return None, None
+    _check_target(df, PANEL.lines, w, h)
     inside = np.flatnonzero((df["x"] >= left - 2) & (df["x"] <= right + 2))
-    if len(inside) < 10:
+    if len(inside) < 10 or not _near_price(df, inside[0], inside[-1], h - 1 - bottom, h - 1 - top):
         return df, None
     found = {"start": int(inside[0]), "end": int(inside[-1]),
              "top": float(h - 1 - top), "bottom": float(h - 1 - bottom),

@@ -41,7 +41,7 @@ from feedback import (MIN_VOTES_FIT, features, item_window, learn, make_judge, r
 from feedback import summary as learning_summary
 from similarity import example_from_item
 from fingerprint import FAMILY, describe as describe_fingerprint, kind_text, make_fingerprint, range_from_box, screenshot_fingerprint
-from vision import extract_candles, extract_marks, extract_range
+from vision import UnreliableScreenshot, extract_candles, extract_marks, extract_range
 import billing
 import storage
 import brain
@@ -53,7 +53,7 @@ from confluence import direction, score as confluence_score
 from market import candles_to_df, fetch_many, get_candles
 from texts import plural
 from version import VERSION
-from trendlines import KIND_NAMES, kind_from_drawing
+from trendlines import FAMILY_BY_PATTERN, KIND_NAMES, kind_from_drawing
 from vision import analyze_screenshot, describe_lines, draw_debug
 
 PATTERNS_DIR = "patterns"
@@ -1386,15 +1386,13 @@ def receive_example(chat_id, name, path):
     else:
         fp, item = None, None
     if fp is None:
-        pattern_id = add_pattern(chat_id, name, path, note="скрин без отпечатка")
+        remove_file(path)
         seen = f"вижу {len(candles)} свечей, но" if candles is not None else "не смог прочитать свечи, и"
         send_message(f"На скрине {seen} не нашёл «{name}» по правилу:\n{PATTERN_INFO[name]}\n\n"
-                     "Скрин сохранил, но сравнивать с ним находки не смогу. Лучше пришли другой: "
+                     "Для сравнения нужен другой скрин: "
                      "свечи крупно, видно 20–30 свечей до паттерна и несколько после, без индикаторов "
                      "(объём снизу — можно, я его прочитаю).", chat_id,
-                     {"inline_keyboard": [[{"text": "📷 Прислать другой", "callback_data": f"shot:{index}"},
-                                           {"text": "🗑 Удалить этот", "callback_data": f"bad:{pattern_id}"}],
-                                          [{"text": "📂 Мои паттерны", "callback_data": "my"}, TO_MENU]]})
+                     retry_keyboard(index))
         return
     pattern_id = add_pattern(chat_id, name, path, note="скрин", kind=item.get("kind"), fingerprint=fp)
     understood = attach_spec(chat_id, pattern_id)
@@ -1449,6 +1447,14 @@ def receive_shape(chat_id, name, path):
 def receive_pattern_photo(chat_id, name, file_id, caption=""):
     path = f"{PATTERNS_DIR}/{chat_id}_{int(time.time() * 1000)}.jpg"
     download_photo(file_id, path)
+    try:
+        _read_pattern_photo(chat_id, name, path, caption)
+    except UnreliableScreenshot as error:
+        remove_file(path)
+        send_message(str(error), chat_id, retry_keyboard(ALL_PATTERNS.index(name)))
+
+
+def _read_pattern_photo(chat_id, name, path, caption):
     index = ALL_PATTERNS.index(name)
     # подпись к скрину — описание паттерна словами: бот учитывает его, когда ищет паттерн на скрине
     spec = language.understand(caption, name, smart=billing.is_pro(chat_id)) if (caption or "").strip() else None
@@ -1474,6 +1480,9 @@ def receive_pattern_photo(chat_id, name, file_id, caption=""):
         if seen is not None:
             figure = seen[1]["kind"]
             lines_text = "линии фигуры нашёл сам по свечам"
+    if name in LINE_PATTERNS and figure not in FAMILY_BY_PATTERN[name]:
+        reason = f"По границам вижу «{KIND_NAMES[figure]}»." if figure else "Не удалось выделить две границы фигуры."
+        raise UnreliableScreenshot(f"{reason} Для «{name}» отметь обе стороны или выбери другой тип паттерна.")
     pattern_id = add_pattern(chat_id, name, path, lines_text, figure)
     understood = attach_spec(chat_id, pattern_id)
 
