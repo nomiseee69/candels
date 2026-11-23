@@ -364,6 +364,19 @@ def marked_items(name, df, zones, lines):
     for mark in zones or [None]:
         ranked = [(float(_zone_match(item, mark) if mark else _line_match(item, lines, df)), item)
                   for item in items]
+        if name == "Range" and mark is not None and "end" in mark:
+            from ranges import ranges_at_box
+            ranked.extend((_zone_match(item, mark), item) for item in ranges_at_box(df, mark["start"], mark["end"]))
+        if FAMILY[name] == "flags" and not mark and 2 <= len(lines) <= 4:
+            from itertools import combinations
+            from catalog import FLAG_SHAPE
+            from flags import flag_at_lines
+            if len(lines) > 2:
+                ranked = []
+            for a, b in combinations(lines, 2):
+                item = flag_at_lines(df, FLAG_SHAPE[name], a, b)
+                if item is not None:
+                    ranked.append((_line_match(item, [a, b], df), item))
         if ranked:
             yield max(ranked, key=lambda pair: pair[0])
 

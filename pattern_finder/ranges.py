@@ -154,6 +154,17 @@ def _after(df, found, horizon):
     return None, None
 
 
+def ranges_at_box(df, first, last):
+    """Validate a drawn box on its candles; a raster edge can straddle two bars."""
+    arrays = _arrays(df)
+    for start in range(max(0, first - 1), first + 2):
+        for end in range(last - 1, min(len(df), last + 2)):
+            if min(WINDOWS) <= end - start + 1 <= max(WINDOWS):
+                item = _at(df, arrays, start, end)
+                if item is not None:
+                    yield item
+
+
 def _finish(df, found):
     bottom, top = found["box"]
     last = float(df["close"].iloc[-1])

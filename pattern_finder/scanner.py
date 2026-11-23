@@ -13,7 +13,7 @@ from history import (
 )
 from market import FALLBACK_SYMBOLS, candles_to_df, fetch_many, get_candles
 from matcher import find_best_match
-from shapes_check import shape_label, validate
+from shapes_check import landmark_closes, shape_label, validate
 from notifier import tradingview_link
 from shape import photo_to_shape
 from similarity import SIMILAR_ENOUGH, best_match, reference_from_screenshot
@@ -126,6 +126,28 @@ def find_shape(df, shapes, builtin=None, name=None, extra=None):
         best["builtin"] = True                              # «похоже на эталон», а не «на твой пример»
     if len(shapes) == 1:
         best.pop("example")
+    return best
+
+
+def find_photo_shape(df, example):
+    """Compare the same landmark-to-landmark trace used to construct the photo query."""
+    from structure import atr
+    name, shape = example["name"], example["shape"]
+    sizes = atr(df).to_numpy()
+    best = None
+    for width in sorted(set(WINDOWS) | {example["shape_window"]}):
+        for end in range(len(df), max(width - 1, len(df) - RECENT), -1):
+            start = end - width
+            figure = validate(name, df, start, width, sizes)
+            if not figure:
+                continue
+            segment = landmark_closes(df, figure).tolist()
+            if len(segment) < 8:
+                continue
+            _, score = find_best_match(segment, shape, len(segment))
+            if score >= MIN_SCORE and (best is None or score > best["score"]):
+                best = {**figure, "name": name, "start": start, "window": width,
+                        "score": float(score), "label": shape_label(name, figure)}
     return best
 
 
@@ -258,6 +280,9 @@ def build_detectors(patterns, settings=None):
             if name in seen:
                 continue
             seen.add(name)
+            if len(patterns) == 1 and p.get("shape_window") and p.get("shape") and (settings or {}).get("similar_only"):
+                detectors.append((name, lambda df, ex=p: rate(df, find_photo_shape(df, ex))))
+                continue
             # все примеры паттерна — один детектор: нет дублей «Двойное дно» в одном алерте
             shapes, builtin = [], []
             for q in patterns:

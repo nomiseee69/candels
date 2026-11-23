@@ -157,6 +157,21 @@ def _arrays(df):
             df["close"].to_numpy(dtype=float), atr(df).to_numpy())
 
 
+def flag_at_lines(df, shape, a, b):
+    """Fit the pole and consolidation at the overlap of two drawn boundaries."""
+    start = max(0, round(max(a["x0"], b["x0"])))
+    end = min(len(df) - 1, round(min(a["x1"], b["x1"])))
+    if not min(BODIES) <= end - start + 1 <= max(BODIES):
+        return None
+    item = _at(_arrays(df), shape, start, end)
+    if item is None:
+        return None
+    x = (start + end) / 2
+    mid = (_line(item["upper"], x) + _line(item["lower"], x)) / 2
+    heights = [_line((ln["x0"], ln["y0"], ln["x1"], ln["y1"]), x) for ln in (a, b)]
+    return item if min(heights) < mid < max(heights) else None
+
+
 def _label(found, breakout=None):
     retrace = found["retrace"]
     depth = "неглубокий" if retrace < 0.38 else "средний" if retrace < 0.62 else "глубокий"

@@ -148,6 +148,11 @@ def shape_label(name, found):
     return text + (", шея пробита — фигура подтверждена" if found.get("confirmed") else ", ждём пробоя шеи")
 
 
+def landmark_closes(df, figure):
+    points = figure["points"]
+    return df.close.iloc[points[0][0]:points[-1][0] + 1]
+
+
 def read_shape(name, path):
     """Двойное дно / вершина, ГиП на СКРИНШОТЕ: читаем свечи и ищем фигуру по точкам на
     любом участке скрина (фигура может занимать не весь скрин). (свечи, фигура) или None."""

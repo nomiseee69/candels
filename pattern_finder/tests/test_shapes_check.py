@@ -2,11 +2,30 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from history import history_shapes
 from scanner import WINDOWS, find_shape
 from shapes_check import validate
 from templates import template_shape
+
+
+@pytest.mark.parametrize("name,mirror", [("Голова и плечи",False), ("Перевёрнутая ГиП",True)])
+def test_photo_compares_landmarks_after_structural_validation(name, mirror):
+    from scanner import build_detectors
+    from shape import normalize, resample
+    from shapes_check import landmark_closes
+    points = [(0,95), (11,105), (20,100), (31,113), (41,100), (51,105), (66,96)]
+    df = frame(points, mirror=mirror)
+    figure = validate(name, df, 60, 67)
+    assert figure and figure["points"][0][0] > 60
+    shape = normalize(resample(landmark_closes(df,figure),50)).tolist()
+    query = {"name":name,"shape":shape,"shape_window":67}
+    jobs, _ = build_detectors([query], {"similar_only":True})
+    result = jobs[0][1](df)
+    assert result["score"] > .99 and result["points"][2][0] == figure["points"][2][0]
+    straight = frame([(0,80),(66,120)])
+    assert jobs[0][1](straight) is None
 
 
 def frame(points, mirror=False, seed=0, before=60):

@@ -116,6 +116,19 @@ def pivot_lows(values, window):
     ]
 
 
+def drawn_span_has_swings(df, lines):
+    """A two-sided formation needs an observed swing high and low under the drawing."""
+    first = max(0, int(np.floor(min(line["x0"] for line in lines))))
+    last = min(len(df) - 1, int(np.ceil(max(line["x1"] for line in lines))))
+    observed = df.iloc[first:last + 1]
+    edges = [line[key] for line in lines for key in ("y0", "y1")]
+    if observed.empty or observed.high.max() < min(edges) or observed.low.min() > max(edges):
+        return False
+    highs = pivot_highs(df.high.tolist(), PIVOT_WINDOW)
+    lows = pivot_lows(df.low.tolist(), PIVOT_WINDOW)
+    return any(first <= i <= last for i in highs) and any(first <= i <= last for i in lows)
+
+
 def _pivot_window(n):
     """Чем длиннее окно, тем крупнее свинги: в окне из 250 свечей нужны экстремумы
     среди 10 соседей, а не 3, — иначе каждый мелкий зубец станет «касанием»."""
