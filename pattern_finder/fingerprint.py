@@ -358,6 +358,26 @@ def _line_match(item, lines, df):
     return best
 
 
+def _flag_body_match(item, a, b):
+    """Сравнить обе границы в пределах подтверждённого тела флага."""
+    start, _, end, _ = item["upper"]
+    mid = (start + end) / 2
+
+    def at(line, x):
+        x0, y0, x1, y1 = line
+        return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+
+    marks = [(line["x0"], line["y0"], line["x1"], line["y1"]) for line in (a, b)]
+    marks.sort(key=lambda line: at(line, mid), reverse=True)
+    edges = item["upper"], item["lower"]
+    coverage = min(max(0, min(end, line[2]) - max(start, line[0])) for line in marks) / (end - start)
+    height = min(at(edges[0], x) - at(edges[1], x) for x in (start, end))
+    if height <= 0:
+        return 0.0
+    error = max(abs(at(line, x) - at(edge, x)) for line, edge in zip(marks, edges) for x in (start, end))
+    return coverage * max(0., 1 - error / height)
+
+
 def marked_items(name, df, zones, lines):
     """Находки правила, совпавшие с разметкой по цене и времени."""
     items = all_items(name, df)
@@ -376,7 +396,10 @@ def marked_items(name, df, zones, lines):
             for a, b in combinations(lines, 2):
                 item = flag_at_lines(df, FLAG_SHAPE[name], a, b)
                 if item is not None:
-                    ranked.append((_line_match(item, [a, b], df), item))
+                    score = _line_match(item, [a, b], df)
+                    if name == "Флаг" and score < .70:
+                        score = max(score, _flag_body_match(item, a, b))
+                    ranked.append((score, item))
         if ranked:
             yield max(ranked, key=lambda pair: pair[0])
 

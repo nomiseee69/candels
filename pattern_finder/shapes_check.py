@@ -153,6 +153,42 @@ def landmark_closes(df, figure):
     return df.close.iloc[points[0][0]:points[-1][0] + 1]
 
 
+def marked_double_reversal(name, df, lines):
+    """Привязать W/M к ломаной с двумя днами/вершинами и промежуточной шеей."""
+    strokes = sorted((line for line in lines if not line["flat"]), key=lambda line: line["x0"])
+    if not 2 <= len(strokes) <= 5:
+        return None
+    left = min(line["x0"] for line in strokes)
+    right = max(line["x1"] for line in strokes)
+    span = right - left
+    if span < 8:
+        return None
+
+    sizes = atr(df).to_numpy()
+    start_lo = max(0, int(left - span * .6))
+    end_hi = min(len(df), int(right + span * .6) + 1)
+    stride = max(1, int(span // 24))
+    time_tol = max(2., span * .08)
+    best = None
+    for start in range(start_lo, int(left) + 1, stride):
+        for end in range(min(len(df), int(right) + 1), end_hi + 1, stride):
+            figure = validate(name, df, start, end - start, sizes)
+            if not figure or not figure["confirmed"]:
+                continue
+            price_tol = max(float(np.median(sizes[start:end])), figure["height"] * .18)
+            # Обе внутренние стороны должны соединять дно, шею и второе дно.
+            hits = []
+            for (x, y), (xx, yy) in zip(figure["points"][1:3], figure["points"][2:4]):
+                hits.append(any(abs(line["x0"] - x) <= time_tol and abs(line["x1"] - xx) <= time_tol
+                                and abs(line["y0"] - y) <= price_tol and abs(line["y1"] - yy) <= price_tol
+                                for line in strokes))
+            if all(hits):
+                rank = figure["height"], start - end
+                if best is None or rank > best[0]:
+                    best = (rank, figure, end - start)
+    return best[1:] if best else None
+
+
 def read_shape(name, path):
     """Двойное дно / вершина, ГиП на СКРИНШОТЕ: читаем свечи и ищем фигуру по точкам на
     любом участке скрина (фигура может занимать не весь скрин). (свечи, фигура) или None."""
