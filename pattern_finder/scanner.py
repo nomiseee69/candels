@@ -13,7 +13,7 @@ from history import (
 )
 from market import FALLBACK_SYMBOLS, candles_to_df, fetch_many, get_candles
 from matcher import find_best_match
-from shapes_check import landmark_closes, shape_label, validate
+from shapes_check import landmark_closes, neckline_figure, shape_label, validate
 from notifier import tradingview_link
 from shape import photo_to_shape
 from similarity import SIMILAR_ENOUGH, best_match, reference_from_screenshot
@@ -135,10 +135,21 @@ def find_photo_shape(df, example):
     name, shape = example["name"], example["shape"]
     sizes = atr(df).to_numpy()
     best = None
+    neck = example.get("neck_template")
     for width in sorted(set(WINDOWS) | {example["shape_window"]}):
-        for end in range(len(df), max(width - 1, len(df) - RECENT), -1):
+        # A marked screenshot can include price action after the selected breakout.
+        recent = max(RECENT, 1 + round(neck["trailing_bars"] * width / example["shape_window"])) if neck else RECENT
+        for end in range(len(df), max(width - 1, len(df) - recent), -1):
             start = end - width
-            figure = validate(name, df, start, width, sizes)
+            if neck:
+                part = df.iloc[start:end]
+                floor = float(part.low.min())
+                height = float(part.high.max()) - floor
+                line = {"x0": start + neck["x0"] * (width - 1), "x1": start + neck["x1"] * (width - 1),
+                        "y0": floor + neck["y0"] * height, "y1": floor + neck["y1"] * height}
+                figure = neckline_figure(name, df, start, end, line, sizes)
+            else:
+                figure = validate(name, df, start, width, sizes)
             if not figure:
                 continue
             segment = landmark_closes(df, figure).tolist()
@@ -377,13 +388,16 @@ def scan_user(patterns, intervals=DEFAULT_INTERVALS, fetch=None, symbols=None, s
     cards = []
     if not detectors:
         return cards, skipped
+    min_bars = max(WINDOWS)
+    if len(patterns) == 1 and patterns[0].get("neck_template") and settings.get("similar_only"):
+        min_bars = min(min_bars, patterns[0]["shape_window"])
     charts = {}                                       # (монета, ТФ) → график: для трендов всех ТФ
 
     for interval in intervals:
         all_candles = fetch_many(symbols, interval, CANDLES, fetch)
         for symbol in symbols:
             candles = all_candles[symbol]
-            if not candles or len(candles) < max(WINDOWS):
+            if not candles or len(candles) < min_bars:
                 continue                              # молодая монета — мало свечей для поиска
             df = candles_to_df(candles)
             charts[(symbol, interval)] = df

@@ -95,3 +95,29 @@ def test_neckline_mark_does_not_replace_confirmation(monkeypatch, case):
     monkeypatch.setattr(screenshot_query, "extract_marks", lambda _: (df, [], [mark]))
     with pytest.raises(UnreliableScreenshot):
         screenshot_query.screenshot_choices("decoded")
+
+def test_photo_scanner_transfers_marked_shoulders_to_another_price_scale(monkeypatch):
+    from scanner import find_photo_shape
+
+    df = recovered_candles(extra_swing=True)
+    monkeypatch.setattr(screenshot_query, "extract_marks", lambda _: (df, [], [neckline_mark(df)]))
+    reference = dict(screenshot_query.screenshot_choices("decoded"))[NAME]
+    foreign = df.copy()
+    prices = ["open", "high", "low", "close"]
+    foreign[prices] = foreign[prices] * 7 + 130
+    found = find_photo_shape(foreign, reference)
+    assert found["confirmed"] and found["score"] == pytest.approx(1)
+    assert find_photo_shape(foreign, {**reference, "name": "Голова и плечи"}) is None
+
+def test_short_marked_photo_can_reach_result_card(monkeypatch):
+    from scanner import scan_user
+
+    df = recovered_candles(extra_swing=True)
+    monkeypatch.setattr(screenshot_query, "extract_marks", lambda _: (df, [], [neckline_mark(df)]))
+    reference = dict(screenshot_query.screenshot_choices("decoded"))[NAME]
+    candles = [[i * 3600000, row.open, row.high, row.low, row.close, 0]
+               for i, row in enumerate(df.itertuples())]
+    cards, skipped = scan_user([reference], ["1h"], fetch=lambda *_: candles, symbols=["TEST"],
+                               settings={"similar_only": True, "quality": "off"})
+    assert not skipped
+    assert cards[0]["items"][0]["score"] == pytest.approx(1)

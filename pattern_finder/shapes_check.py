@@ -207,9 +207,6 @@ def landmark_closes(df, figure):
 
 def marked_head_shoulders(name, df, lines):
     """Подтверждённая ГиП с двумя опорами на нарисованной шее."""
-    sign = -1 if name in MIRRORED else 1
-    approach_prices = sign * df["high" if sign < 0 else "low"]
-    closes = sign * df.close.to_numpy()
     sizes = atr(df).to_numpy()
     for line in lines:
         x0, x1 = line["x0"], line["x1"]
@@ -218,33 +215,57 @@ def marked_head_shoulders(name, df, lines):
             continue
         start = max(0, int(x0 - span * .65))
         end = min(len(df), int(np.ceil(x1 + max(3, span * .10))) + 1)
-        price = sign * line["y0"]
-        slope = sign * (line["y1"] - line["y0"]) / span
-        tolerance = max(2, span * .10)
-
-        def accepts(figure):
-            if not figure["confirmed"]:
-                return False
-            # Для перевёрнутой фигуры и цены, и разметка отражены.
-            left, first, head, second, right, _ = figure["points"]
-            approach = approach_prices.iloc[max(0, start + 2 * left[0] - head[0]):start + left[0]]
-            if approach.empty or left[1] - float(approach.min()) < ARRIVAL * figure["height"]:
-                return False
-            if abs(start + first[0] - x0) > tolerance or start + second[0] > x1 + tolerance:
-                return False
-            for x, y in (first, second):
-                drawn_price = price + slope * (start + x - x0)
-                if abs(drawn_price - y) > sizes[start + x] / 2:
-                    return False
-            fitted_slope = (second[1] - first[1]) / (second[0] - first[0])
-            return any(closes[x] < min(price + slope * (x - x0),
-                                       first[1] + fitted_slope * (x - start - first[0]))
-                       for x in range(start + right[0] + 1, end))
-
-        figure = validate(name, df, start, end - start, sizes, accept_head_shoulders=accepts)
+        figure = neckline_figure(name, df, start, end, line, sizes)
         if figure:
+            part = df.iloc[start:end]
+            floor = float(part.low.min())
+            height = float(part.high.max()) - floor
+            if height <= 0:
+                continue
+            figure["neck_template"] = {
+                "x0": (x0 - start) / (end - start - 1),
+                "x1": (x1 - start) / (end - start - 1),
+                "y0": (line["y0"] - floor) / height,
+                "y1": (line["y1"] - floor) / height,
+                "trailing_bars": len(df) - end,
+            }
             return figure, end - start
     return None
+
+
+def neckline_figure(name, df, start, end, line, sizes):
+    """Validate both neckline anchors, the approach and the closing breakout in one window."""
+    x0, x1 = line["x0"], line["x1"]
+    span = x1 - x0
+    if span <= 0:
+        return None
+    sign = -1 if name in MIRRORED else 1
+    approach_prices = sign * df["high" if sign < 0 else "low"]
+    closes = sign * df.close.to_numpy()
+    price = sign * line["y0"]
+    slope = sign * (line["y1"] - line["y0"]) / span
+    tolerance = max(2, span * .10)
+
+    def accepts(figure):
+        if not figure["confirmed"]:
+            return False
+        # Для перевёрнутой фигуры и цены, и разметка отражены.
+        left, first, head, second, right, _ = figure["points"]
+        approach = approach_prices.iloc[max(0, start + 2 * left[0] - head[0]):start + left[0]]
+        if approach.empty or left[1] - float(approach.min()) < ARRIVAL * figure["height"]:
+            return False
+        if abs(start + first[0] - x0) > tolerance or start + second[0] > x1 + tolerance:
+            return False
+        for x, y in (first, second):
+            drawn_price = price + slope * (start + x - x0)
+            if abs(drawn_price - y) > sizes[start + x] / 2:
+                return False
+        fitted_slope = (second[1] - first[1]) / (second[0] - first[0])
+        return any(closes[x] < min(price + slope * (x - x0),
+                                   first[1] + fitted_slope * (x - start - first[0]))
+                   for x in range(start + right[0] + 1, end))
+
+    return validate(name, df, start, end - start, sizes, accept_head_shoulders=accepts)
 
 
 def marked_inverse_head_shoulders(df, lines):

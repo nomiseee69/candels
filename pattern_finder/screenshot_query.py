@@ -13,7 +13,10 @@ def _shape_choice(name, df, figure, window):
     segment = landmark_closes(df, figure)
     if len(segment) >= 8:
         shape = normalize(resample(segment, SHAPE_POINTS)).tolist()
-        return name, {"name": name, "shape": shape, "shape_window": window}
+        reference = {"name": name, "shape": shape, "shape_window": window}
+        if "neck_template" in figure:
+            reference["neck_template"] = figure["neck_template"]
+        return name, reference
     return None
 
 
