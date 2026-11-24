@@ -7,6 +7,7 @@ import itertools
 import re
 import os
 import secrets
+import sqlite3
 import tempfile
 import threading
 import time
@@ -46,6 +47,7 @@ from screenshot_query import screenshot_choices
 from fingerprint import FAMILY, describe as describe_fingerprint, kind_text, make_fingerprint, range_from_box, screenshot_fingerprint
 from vision import UnreliableScreenshot, extract_candles, extract_marks, extract_range
 import billing
+import discounts
 import storage
 import brain
 import language
@@ -347,14 +349,24 @@ def subscription_view(chat_id):
              f"⭐ Год — {year[1]} звёзд или {year[2]} ₽, на 20% дешевле\n",
              DISCLAIMER]
     rows = []
-    try:
-        links = billing.stars_links(api_post)
-    except Exception as error:
-        report_error("Ссылки на оплату звёздами", error)
-        links = {}
-    if links:
-        rows.append([{"text": f"⭐ Месяц — {month[1]}", "url": links["month"]}] if "month" in links else [])
-        rows.append([{"text": f"⭐ Год — {year[1]}", "url": links["year"]}] if "year" in links else [])
+    discount = discounts.active(chat_id)
+    if discount:
+        percent = discount["percent"]
+        lines.extend([f"\n🎁 Твоя персональная скидка — {percent}%.",
+                      "Действует на одну оплату Pro звёздами. Счёт без автопродления."])
+        for plan, (_, base, _, title) in billing.PLANS.items():
+            amount = discounts.price(base, percent)
+            lines.append(f"{title}: обычная цена {base} ⭐, твоя цена {amount} ⭐.")
+            rows.append([{"text": f"⭐ {title} · {amount}", "callback_data": f"disc_buy:{plan}"}])
+    else:
+        try:
+            links = billing.stars_links(api_post)
+        except Exception as error:
+            report_error("Ссылки на оплату звёздами", error)
+            links = {}
+        if links:
+            rows.append([{"text": f"⭐ Месяц — {month[1]}", "url": links["month"]}] if "month" in links else [])
+            rows.append([{"text": f"⭐ Год — {year[1]}", "url": links["year"]}] if "year" in links else [])
     if billing.yookassa_on():
         rows.append([{"text": f"💳 Месяц — {month[2]} ₽", "callback_data": "pay:month"},
                      {"text": f"💳 Год — {year[2]} ₽", "callback_data": "pay:year"}])
@@ -363,6 +375,17 @@ def subscription_view(chat_id):
         lines.append("\nОплата сейчас недоступна — напиши администратору.")
     rows.append([TO_MENU])
     return "\n".join(lines), {"inline_keyboard": rows}
+
+
+def send_discount_invoice(chat_id, plan):
+    data = discounts.invoice(chat_id, plan)
+    if not data:
+        text = "Скидочный счёт недоступен. Открой подписку заново, чтобы увидеть актуальную цену."
+    elif api_post("sendInvoice", data).get("ok"):
+        return
+    else:
+        text = "Telegram не смог создать счёт. Скидка сохранена, попробуй ещё раз."
+    send_message(text, chat_id, {"inline_keyboard": [[{"text": "💎 Подписка", "callback_data": "sub"}]]})
 
 
 def paywall(chat_id, reason):
@@ -400,7 +423,18 @@ def check_card_payments(chat_id=None):
 def handle_payment(message):
     """successful_payment: звёзды пришли (первый платёж или автопродление подписки)."""
     chat_id = message["chat"]["id"]
-    text = billing.stars_paid(chat_id, message["successful_payment"])
+    payment = message["successful_payment"]
+    if discounts.is_discount(payment):
+        if private_sender(message) != chat_id:
+            return
+        result, until = discounts.settle(chat_id, payment)
+        if result == "refund":
+            send_message("Этот скидочный счёт не принят. Stars будут возвращены, срок Pro не изменился.", chat_id)
+        if result != "paid":
+            return
+        text = f"💎 Спасибо! Pro активен до {billing.until_text(until)}. Скидка использована."
+    else:
+        text = billing.stars_paid(chat_id, payment)
     if text:
         send_message(text, chat_id, {"inline_keyboard": [[TO_MENU]]})
         alert_admins(f"💰 Оплата звёздами: {user_title(chat_id)}, {message['successful_payment'].get('total_amount')} ⭐", 0)
@@ -411,14 +445,29 @@ def handle_payment(message):
 def handle_refunded(message):
     """Звёзды вернулись пользователю (Telegram сообщил refunded_payment) — Pro снимаем."""
     chat_id = message["chat"]["id"]
-    if billing.stars_refunded(chat_id, message["refunded_payment"]):
+    refund = message["refunded_payment"]
+    if discounts.is_discount(refund) and discounts.mark_extra_refunded(chat_id, refund["telegram_payment_charge_id"]):
+        return
+    if billing.stars_refunded(chat_id, refund):
         send_message("↩️ Оплата возвращена — подписка Pro отменена.", chat_id, {"inline_keyboard": [[TO_MENU]]})
         alert_admins(f"↩️ Возврат звёзд: {user_title(chat_id)}", 0)
 
 
 def handle_pre_checkout(query):
-    ok = billing.check_pre_checkout(query)
-    answer_pre_checkout(query["id"], ok, None if ok else "Этот счёт устарел — открой «💎 Подписка» ещё раз.")
+    if discounts.is_discount(query):
+        result = discounts.pre_checkout(query)
+    else:
+        result = "ok" if billing.check_pre_checkout(query) else "stale"
+    error = {"busy": "Уже открыта другая оплата со скидкой. Подожди несколько минут и открой новый счёт.",
+             "stale": "Этот счёт недоступен — открой «💎 Подписка» ещё раз."}
+    answer_pre_checkout(query["id"], result == "ok", error.get(result))
+
+
+def private_sender(message):
+    chat = message.get("chat") or {}
+    sender = (message.get("from") or {}).get("id")
+    if sender and sender > 0 and sender == chat.get("id") and chat.get("type", "private") == "private":
+        return sender
 
 
 # --- админ ------------------------------------------------------------------------------------------
@@ -456,12 +505,14 @@ def find_user_id(word):
 def remember_username(message):
     """Запоминаем @username — чтобы админ мог писать /grant @user, а в списке было видно, кто есть кто."""
     sender = message.get("from") or {}
-    chat_id = message.get("chat", {}).get("id")
-    if not chat_id or sender.get("id") != chat_id:
+    chat_id = private_sender(message)
+    if not chat_id:
         return
-    name = sender.get("username") or sender.get("first_name") or ""
-    if name and storage.get_user(chat_id).get("username") != name:
-        storage.update_user(chat_id, lambda u: u.__setitem__("username", name))
+    username = sender.get("username")
+    name = username or sender.get("first_name") or ""
+    user = storage.get_user(chat_id)
+    if "telegram_username" not in user or user["telegram_username"] != username or user.get("username") != name:
+        storage.update_user(chat_id, lambda u: u.update(username=name, telegram_username=username))
 
 
 def user_title(key, user=None):
@@ -477,7 +528,8 @@ def admin_view(chat_id):
     rows = [[{"text": "👥 Пользователи", "callback_data": "adm:users:0"},
              {"text": "📣 Рассылка", "callback_data": "adm:bc"}],
             [{"text": "💾 Копия базы", "callback_data": "adm:backup"},
-             {"text": "🔄 Обновить", "callback_data": "adm:home"}], [TO_MENU]]
+             {"text": "🔄 Обновить", "callback_data": "adm:home"}],
+            [{"text": "🎁 Скидки", "callback_data": "adm:d:home"}], [TO_MENU]]
     return billing.stats() + wallet + "\n\n" + ADMIN_HELP, {"inline_keyboard": rows}
 
 
@@ -554,6 +606,132 @@ def admin_refund(key):
     return f"↩️ Вернул {stars[0]['amount']:.0f} ⭐ пользователю {user_title(key)}, Pro снят."
 
 
+discount_drafts = {}
+DISCOUNT_BACK = {"text": "🔙 Назад", "callback_data": "adm:d:home"}
+DISCOUNT_CANCEL = {"text": "❌ Отмена", "callback_data": "adm:d:home"}
+DISCOUNT_PAGE = 8
+
+
+def discount_user_title(user_id):
+    user = storage.get_user(user_id)
+    name = user.get("telegram_username")
+    return f"@{name} · ID {user_id}" if name else f"ID {user_id}"
+
+
+def discount_menu():
+    rows = [[{"text": "➕ Выдать скидку", "callback_data": "adm:d:new"}],
+            [{"text": "📋 Активные скидки", "callback_data": "adm:d:list:0"}],
+            [{"text": "❌ Отменить скидку", "callback_data": "adm:d:pick:0"}],
+            [{"text": "🔙 Назад", "callback_data": "adm:home"}]]
+    return "🎁 Персональные скидки на Pro через Stars", {"inline_keyboard": rows}
+
+
+def discount_list(action, page):
+    found = discounts.list_active(page * DISCOUNT_PAGE, DISCOUNT_PAGE + 1)
+    lines = ["Выбери скидку для отзыва." if action == "pick" else "📋 Активные скидки"]
+    rows = []
+    for row in found[:DISCOUNT_PAGE]:
+        label = f"{discount_user_title(row['user_id'])} · {row['percent']}%"
+        if action == "pick":
+            rows.append([{"text": label, "callback_data": f"adm:d:revoke:{row['user_id']}:{row['id']}"}])
+        else:
+            lines.append(f"{label} · активна")
+    if not found:
+        lines.append("На этой странице нет активных скидок.")
+    nav = []
+    if page:
+        nav.append({"text": "◀️", "callback_data": f"adm:d:{action}:{page - 1}"})
+    if len(found) > DISCOUNT_PAGE:
+        nav.append({"text": "▶️", "callback_data": f"adm:d:{action}:{page + 1}"})
+    if nav:
+        rows.append(nav)
+    return "\n".join(lines), {"inline_keyboard": [*rows, [DISCOUNT_BACK]]}
+
+
+def discount_preview(admin_id, user_id, percent, expected=None, *, revoking=False):
+    token = secrets.token_urlsafe(12)
+    expected_id = expected["id"] if expected else None
+    discount_drafts[admin_id] = ("confirm", token, user_id, percent, expected_id, revoking)
+    who = discount_user_title(user_id)
+    if revoking:
+        text = f"Отозвать неиспользованную скидку {percent}% у пользователя {who}?"
+    else:
+        text = f"🎁 Персональная скидка\n\n👤 Пользователь: {who}\n💰 Скидка: {percent}%\n🔄 Использований: 1"
+        if expected:
+            text += f"\n\nУ пользователя уже есть скидка {expected['percent']}%. Подтверждение заменит её."
+    return text, {"inline_keyboard": [[{"text": "✅ Подтвердить", "callback_data": f"adm:d:confirm:{token}"},
+                                        DISCOUNT_CANCEL]]}
+
+
+def discount_admin_text(admin_id, text):
+    draft = discount_drafts.get(admin_id)
+    if not draft:
+        return False
+    keyboard = {"inline_keyboard": [[DISCOUNT_CANCEL]]}
+    if draft[0] == "user":
+        user_id = discounts.resolve_user(text, api_post)
+        if user_id is None:
+            send_message("Не удалось однозначно найти пользователя. Попроси его отправить боту /start. "
+                         "Если имя совпадает у нескольких записей, введи числовой Telegram ID.", admin_id, keyboard)
+        else:
+            discount_drafts[admin_id] = ("percent", user_id)
+            send_message(f"{discount_user_title(user_id)}. Введи целый процент скидки от 1 до 99.", admin_id, keyboard)
+    elif draft[0] == "percent":
+        percent = text.removesuffix("%").strip()
+        if not re.fullmatch(r"[0-9]{1,2}", percent) or not 1 <= int(percent) <= 99:
+            send_message("Введи целое число от 1 до 99.", admin_id, keyboard)
+        else:
+            user_id = draft[1]
+            show_view(admin_id, None, discount_preview(admin_id, user_id, int(percent), discounts.active(user_id)))
+    else:
+        send_message("Подтверди действие или нажми «Отмена» под просмотром скидки.", admin_id)
+    return True
+
+
+def discount_admin_callback(admin_id, message_id, media, parts):
+    action, *args = parts
+    if action != "confirm":
+        discount_drafts.pop(admin_id, None)
+    if action == "home":
+        show_view(admin_id, message_id, discount_menu(), media)
+    elif action == "new":
+        writing_broadcast.discard(admin_id)
+        discount_drafts[admin_id] = ("user",)
+        show_view(admin_id, message_id, ("Введи @username или числовой Telegram ID пользователя.",
+                                         {"inline_keyboard": [[DISCOUNT_CANCEL]]}), media)
+    elif action in ("list", "pick") and len(args) == 1 and re.fullmatch(r"[0-9]{1,8}", args[0]):
+        show_view(admin_id, message_id, discount_list(action, int(args[0])), media)
+    elif action == "revoke" and len(args) == 2 and all(re.fullmatch(r"[0-9]{1,16}", part) for part in args):
+        user_id, expected_id = map(int, args)
+        row = discounts.active(user_id)
+        view = (discount_preview(admin_id, user_id, row["percent"], row, revoking=True)
+                if row and row["id"] == expected_id else
+                ("Эта скидка уже изменилась.", {"inline_keyboard": [[DISCOUNT_BACK]]}))
+        show_view(admin_id, message_id, view, media)
+    elif action == "confirm":
+        draft = discount_drafts.get(admin_id)
+        if not draft or draft[0] != "confirm" or args != [draft[1]]:
+            send_message("Подтверждение устарело. Открой раздел скидок снова.", admin_id,
+                         {"inline_keyboard": [[DISCOUNT_BACK]]})
+            return
+        del discount_drafts[admin_id]
+        _, _, user_id, percent, expected_id, revoking = draft
+        result = (discounts.revoke(admin_id, user_id, expected_id) if revoking else
+                  discounts.issue(admin_id, user_id, percent, expected_id))
+        text = {"issued": f"✅ Скидка {percent}% выдана. {discount_user_title(user_id)}",
+                "revoked": f"✅ Скидка отозвана. {discount_user_title(user_id)}",
+                "busy": "Пользователь сейчас оплачивает счёт. Повтори действие через несколько минут.",
+                "unknown": "Пользователь не найден. Попроси его отправить боту /start."}
+        show_view(admin_id, message_id, (text.get(result, "Скидка изменилась. Повтори действие."),
+                                         {"inline_keyboard": [[DISCOUNT_BACK]]}), media)
+        if result == "issued":
+            try:
+                send_message(f"🎁 Тебе выдана персональная скидка {percent}% на одну оплату Pro звёздами.",
+                             user_id, {"inline_keyboard": [[{"text": "💎 Подписка", "callback_data": "sub"}]]})
+            except requests.RequestException as error:
+                report_error("Уведомление о скидке", error)
+
+
 def admin_callback(chat_id, message_id, value, media):
     """Кнопки админ-панели (adm:…). Каждый раз проверяем, что нажал админ."""
     if not billing.is_admin(chat_id):
@@ -561,6 +739,7 @@ def admin_callback(chat_id, message_id, value, media):
     parts = value.split(":")
     action = parts[0]
     if action == "home":
+        discount_drafts.pop(chat_id, None)
         show_view(chat_id, message_id, admin_view(chat_id), media)
     elif action == "users":
         show_view(chat_id, message_id, users_view(int(parts[1] or 0)), media)
@@ -584,6 +763,7 @@ def admin_callback(chat_id, message_id, value, media):
         path = storage.backup()
         send_message(f"Копия базы: {path}" if path else "Базы ещё нет.", chat_id)
     elif action == "bc":
+        discount_drafts.pop(chat_id, None)
         writing_broadcast.add(chat_id)
         send_message("📣 Напиши следующим сообщением текст рассылки — я покажу, как он выглядит, и спрошу, "
                      "отправлять ли всем.", chat_id, {"inline_keyboard": [[{"text": "Отмена", "callback_data": "adm:bcno"}]]})
@@ -614,6 +794,7 @@ def admin_command(chat_id, command, argument):
     args = [a.strip(",;") for a in argument.replace(",", " ").split() if a.strip(",;")]
     who = find_user_id(args[0]) if args else None
     if command == "/admin":
+        discount_drafts.pop(chat_id, None)
         show_view(chat_id, None, admin_view(chat_id))
     elif command == "/users" or (command in ("/user", "/grant", "/revoke", "/refund") and who is None):
         if args:
@@ -1644,11 +1825,14 @@ def handle_message(message):
         return
     remember_username(message)
     chat_id = message["chat"]["id"]
+    text = message.get("text", "").strip()
+    if (text and not text.startswith("/") and private_sender(message) == chat_id and billing.is_admin(chat_id)
+            and discount_admin_text(chat_id, text)):
+        return
     if chat_id in writing_broadcast and message.get("text") and not message["text"].startswith("/"):
         writing_broadcast.discard(chat_id)
         draft_broadcast(chat_id, message["text"])
         return
-    text = message.get("text", "").strip()
     if first_visit(chat_id) and not text.startswith(("/start", "/help")):
         send_welcome(chat_id)                          # новичку — сначала объяснение
 
@@ -2441,7 +2625,16 @@ def handle_callback(query):
         return
 
     if data.startswith("adm:"):
-        admin_callback(chat_id, message_id, data[4:], media)
+        if data.startswith("adm:d:"):
+            if private_sender({"chat": message["chat"], "from": query.get("from")}) == chat_id and billing.is_admin(chat_id):
+                discount_admin_callback(chat_id, message_id, media, data[6:].split(":"))
+        else:
+            admin_callback(chat_id, message_id, data[4:], media)
+        return
+
+    if data.startswith("disc_buy:"):
+        if private_sender({"chat": message["chat"], "from": query.get("from")}) == chat_id:
+            background(send_discount_invoice, chat_id, data.partition(":")[2])
         return
 
     if data == "home":                                  # меню внизу чата, сообщение с кнопкой остаётся
@@ -2716,7 +2909,7 @@ class Chores:
     раз в минуту — проверить оплаты картой; раз в час — напоминания о продлении;
     раз в сутки — резервная копия базы."""
 
-    EVERY = {"payments": 60, "reminders": 3600, "backup": 86400}
+    EVERY = {"payments": 60, "discount_refunds": 60, "reminders": 3600, "backup": 86400}
 
     def __init__(self):
         self.last = {name: 0 for name in self.EVERY}
@@ -2737,6 +2930,10 @@ class Chores:
     @staticmethod
     def payments():
         check_card_payments()
+
+    @staticmethod
+    def discount_refunds():
+        discounts.retry_refunds(api_post)
 
     @staticmethod
     def reminders():
@@ -2809,7 +3006,6 @@ def main():
             failures = 0
 
         for update in updates:
-            offset = update["update_id"] + 1
             try:
                 if "message" in update:
                     handle_message(update["message"])
@@ -2819,6 +3015,12 @@ def main():
                     handle_pre_checkout(update["pre_checkout_query"])
             except Exception as error:
                 report_error("Ошибка при обработке", error)
+                payment = update.get("message", {}).get("successful_payment")
+                if isinstance(error, sqlite3.Error) and payment and discounts.is_discount(payment):
+                    # Не подтверждаем получение платежа, пока не записали его в базу.
+                    time.sleep(1)
+                    break
+            offset = update["update_id"] + 1
 
 
 if __name__ == "__main__":

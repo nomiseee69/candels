@@ -18,6 +18,7 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import closing, contextmanager
 
 FILE = "users.json"          # имя старого файла; база лежит рядом: users.db
 LOCK = threading.RLock()     # RLock: функция под замком может вызвать другую такую же
@@ -60,6 +61,26 @@ def _migrate():
     connection.close()
     os.replace(FILE, FILE + ".migrated")
     print(f"Перенёс {len(users)} пользователей из {FILE} в базу {db_path()}")
+
+
+@contextmanager
+def transaction():
+    """Запись в SQLite с тем же замком, что и у остальных изменений пользователей."""
+    with LOCK:
+        _migrate()
+        with closing(_connect()) as connection, connection:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("BEGIN IMMEDIATE")
+            yield connection
+
+
+def update_user_in(connection, chat_id, change):
+    row = connection.execute("SELECT data FROM users WHERE chat_id = ?", (str(chat_id),)).fetchone()
+    user = json.loads(row[0]) if row else {"patterns": []}
+    result = change(user)
+    connection.execute("INSERT OR REPLACE INTO users VALUES (?, ?)",
+                       (str(chat_id), json.dumps(user, ensure_ascii=False)))
+    return result
 
 
 @locked
@@ -112,11 +133,18 @@ def add_payment(payment_id, chat_id, source, plan, amount, currency, status="suc
     """True — платёж новый и записан; False — такой уже был (повторное уведомление)."""
     connection = _connect()
     with connection:
-        cursor = connection.execute(
-            "INSERT OR IGNORE INTO payments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (str(payment_id), str(chat_id), source, plan, float(amount), currency, time.time(), status,
-             json.dumps(data or {}, ensure_ascii=False)))
+        inserted = add_payment_in(connection, payment_id, chat_id, source, plan, amount, currency,
+                                  status=status, data=data)
     connection.close()
+    return inserted
+
+
+def add_payment_in(connection, payment_id, chat_id, source, plan, amount, currency, *,
+                   status="succeeded", data=None):
+    cursor = connection.execute(
+        "INSERT OR IGNORE INTO payments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (str(payment_id), str(chat_id), source, plan, float(amount), currency, time.time(), status,
+         json.dumps(data or {}, ensure_ascii=False)))
     return cursor.rowcount == 1
 
 

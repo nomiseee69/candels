@@ -156,7 +156,8 @@ def test_settings_change_in_place(tmp_path):
         rec.restore()
 
 
-def test_home_button_everywhere():
+def test_home_button_everywhere(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "FILE", str(tmp_path / "users.json"))
     df = pd.DataFrame({"open_time": pd.date_range("2026-10-01", periods=60, freq="4h", tz="UTC"),
                        "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0})
     coin = {"symbol": "SOLUSDT", "history": False,

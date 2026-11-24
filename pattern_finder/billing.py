@@ -118,18 +118,18 @@ def is_pro(chat_id, now=None):
 def extend(chat_id, days=None, source="admin", until=None, recurring=False, now=None):
     """Продлить Pro: на days дней от конца текущей подписки (или от сейчас) либо до until."""
     now = now or time.time()
+    return storage.update_user(chat_id, lambda user: extend_user(user, days, source, until, recurring, now))
 
-    def change(user):
-        sub = _sub(user)
-        sub["trial_used"] = True
-        base = max(sub.get("until") or 0, now)
-        new = base + (days or 0) * DAY
-        if until:
-            new = max(new, until)                       # подписка звёздами: дату окончания называет Telegram
-        sub["until"] = new
-        sub.update(source=source, recurring=recurring, reminded=None, expired_told=False)
-        return sub["until"]
-    return storage.update_user(chat_id, change)
+
+def extend_user(user, days, source, until, recurring, now):
+    """Изменить запись Pro внутри транзакции вызывающего кода."""
+    sub = _sub(user)
+    new = max(sub.get("until") or 0, now) + (days or 0) * DAY
+    if until:
+        new = max(new, until)
+    sub.update(trial_used=True, until=new, source=source, recurring=recurring,
+               reminded=None, expired_told=False)
+    return new
 
 
 def grant_forever(chat_id):
