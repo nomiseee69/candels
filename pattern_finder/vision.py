@@ -1530,6 +1530,55 @@ def _filled_boxes(img, background, k, min_height, strict=False):
     return boxes
 
 
+def _text_plate_ink(img, box):
+    """У плашки есть строка контрастных нейтральных символов внутри заливки."""
+    left, top, right, bottom, color = box
+    part = img[top:bottom + 1, left:right + 1]
+    h, w = part.shape[:2]
+    if h < 12:
+        return None
+    hsv = cv2.cvtColor(part, cv2.COLOR_BGR2HSV)
+    contrast = np.abs(part.astype(float) - color).sum(axis=2)
+    ink = (hsv[..., 1] < SATURATION_MIN) & (contrast > 2 * FOREGROUND_DIFF)
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8))
+    glyphs = []
+    for label, (x, y, bw, bh, _) in enumerate(stats[1:], 1):
+        if (max(5, .13 * h) <= bh <= .72 * h and 1 <= bw <= 1.3 * bh
+                and x > 0 and x + bw < w and y >= .08 * h and y + bh <= .92 * h):
+            glyphs.append((x, y, bw, bh, label))
+    letters = set()
+    for _, y, _, bh, _ in glyphs:
+        row = sorted(g for g in glyphs if abs(g[1] + g[3] - y - bh) <= max(2, .15 * bh)
+                     and .65 * bh <= g[3] <= 1.5 * bh)
+        run = []
+        for glyph in row:
+            if run and glyph[0] - run[-1][0] - run[-1][2] > 1.5 * bh:
+                run = []
+            run.append(glyph)
+            if len(run) >= 4 and glyph[0] + glyph[2] - run[0][0] >= .45 * w:
+                letters.update(g[4] for g in run)
+    return np.isin(labels, list(letters)) if letters else None
+
+
+def _erase_text_plates(img, plates, background):
+    """Удалить заливку и нейтральный текст, сохраняя контрастные цветные штрихи."""
+    if not plates:
+        return img
+    clean = img.copy()
+    for (left, top, right, bottom, color), ink in plates:
+        part = clean[top:bottom + 1, left:right + 1]
+        contrast = np.abs(part.astype(float) - color).sum(axis=2)
+        part[ink | (contrast < FILL_COLOR)] = background
+    return clean
+
+
+def _inside_plate(line, bounds, offset):
+    left, top, right, bottom = bounds
+    dx, dy = offset
+    return all(left - 3 <= x + dx <= right + 3 and top - 3 <= y + dy <= bottom + 3
+               for x, y in ((line.x1, line.y1), (line.x2, line.y2)))
+
+
 def erase_boxes(img, boxes, background):
     """Стирает заливку и рамку прямоугольников (до цвета фона), свечи под ними остаются."""
     clean = img.copy()
@@ -1929,7 +1978,15 @@ def _prepare(path, with_boxes=False):
     img = load_image(path)
     background = detect_background(img)
     img = erase_legend(img, background)                   # подписи TradingView сверху слева
-    img = erase_labels(img, background, filled_boxes(img, background))
+    boxes = filled_boxes(img, background)
+    plates, highlights = [], []
+    for box in boxes:
+        ink = _text_plate_ink(img, box)
+        if ink is None:
+            highlights.append(box)
+        else:
+            plates.append((box, ink))
+    img = erase_labels(_erase_text_plates(img, plates, background), background, highlights)
     panel = main_panel(img, foreground_mask(img, background))
     if panel is not None:                        # несколько графиков в рамках — берём главный
         top, bottom, left, right = panel
@@ -1957,6 +2014,9 @@ def _prepare(path, with_boxes=False):
             if overlap >= 0.6 * min(a.x2 - a.x1, b.x2 - b.x1) and abs(a.angle - b.angle) < 40 \
                     and abs((a.y1 + a.y2) - (b.y1 + b.y2)) / 2 > 6:
                 lines += [ln for ln in (a, b) if ln not in lines]
+    if plates:
+        offset = (panel[2], panel[0]) if panel is not None else (0, 0)
+        lines = [ln for ln in lines if not any(_inside_plate(ln, box[:4], offset) for box, _ in plates)]
     raw = erase_lines_by_color(img, fg, lines)
     solid = fill_hollow(raw)                      # пустые («hollow») свечи: тело — рамка, внутри фон
     PANEL.hollow = cv2.bitwise_and(solid, cv2.bitwise_not(raw))

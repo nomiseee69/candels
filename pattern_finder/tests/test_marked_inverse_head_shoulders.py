@@ -1,7 +1,8 @@
+import numpy as np
 import pytest
 
 import screenshot_query
-from shapes_check import marked_inverse_head_shoulders, validate
+from shapes_check import _shoulder_geometry, marked_inverse_head_shoulders, validate
 from test_shapes_check import W, frame
 from vision import UnreliableScreenshot
 
@@ -42,6 +43,40 @@ def test_mark_can_disambiguate_shoulder_from_swing_on_the_head_slope():
     result, _ = marked_inverse_head_shoulders(df, [neckline_mark(df)])
     assert result["confirmed"]
     assert [x for x, _ in result["points"][:5]] == [13, 20, 38, 45, 53]
+
+
+def test_bearish_head_shoulders_uses_confirmed_neckline_and_individual_contour(monkeypatch):
+    from scanner import find_photo_shape
+
+    inverse = recovered_candles()
+    mark = neckline_mark(inverse)
+    df = inverse.assign(open=240 - inverse.open, close=240 - inverse.close,
+                        high=240 - inverse.low, low=240 - inverse.high)
+    line = {**mark, "y0": 240 - mark["y0"], "y1": 240 - mark["y1"]}
+    noise = {**line, "y0": line["y0"] + 20, "y1": line["y1"] + 20}
+    monkeypatch.setattr(screenshot_query, "extract_marks", lambda _: (df, [], [line, noise, noise]))
+    [(label, reference)] = screenshot_query.screenshot_choices("decoded")
+    assert label == reference["name"] == "Голова и плечи"
+    assert find_photo_shape(df, reference)["confirmed"]
+
+    monkeypatch.setattr(screenshot_query, "extract_marks", lambda _: (df, [], [noise]))
+    with pytest.raises(UnreliableScreenshot):
+        screenshot_query.screenshot_choices("decoded")
+
+
+def test_one_bar_drop_from_head_needs_independent_neckline():
+    highs = np.full(18, 12.)
+    lows = np.full(18, 10.)
+    closes = np.full(18, 11.)
+    highs[[3, 8, 12]] = [15, 22, 16]
+    lows[[6, 9, 15]] = [7, 8, 5]
+    closes[15] = 6
+    diag = {}
+    args = (highs, lows, closes, 2, 3, 8, 12)
+    assert _shoulder_geometry(*args, lambda **details: diag.update(details)) is None
+    assert diag["reason"] == "compressed_landmarks"
+    marked = _shoulder_geometry(*args, lambda **_: None, head_gap=1)
+    assert marked["confirmed"] and [x for x, _ in marked["points"][:5]] == [3, 6, 8, 9, 12]
 
 
 @pytest.mark.parametrize("case", ["wrong_neckline", "wick_only", "double_bottom", "sideways"])

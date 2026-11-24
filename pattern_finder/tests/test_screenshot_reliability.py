@@ -1,6 +1,7 @@
 import shutil
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pandas as pd
 import pytest
@@ -14,6 +15,26 @@ import vision
 SAMPLES = Path(__file__).with_name("samples")
 
 
+def test_annotation_plate_clears_its_text_and_leaves_price_strokes():
+    background = np.array([10, 10, 10], dtype=np.uint8)
+    fill = np.array([33, 33, 33], dtype=np.uint8)
+    image = np.empty((44, 230, 3), dtype=np.uint8)
+    image[:] = fill
+    # Узкая цветная тень и штрих монохромной свечи рядом с подписью.
+    image[2:40, 5] = (80, 180, 30)
+    image[2:40, 223] = (195, 195, 195)
+    box = (0, 0, 229, 43, fill)
+    assert vision._text_plate_ink(image, box) is None
+    cv2.putText(image, "LEVEL BROKEN", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, .8, (215, 215, 215), 2)
+    ink = vision._text_plate_ink(image, box)
+    assert ink is not None and ink.any()
+    cleaned = vision._erase_text_plates(image, [(box, ink)], background)
+    assert np.all(cleaned[ink] == background) and np.all(cleaned[10, 10] == background)
+    np.testing.assert_array_equal(cleaned[:, (5, 223)][2:40], image[:, (5, 223)][2:40])
+    assert vision._inside_plate(vision.Line(0, 0, 229, 0), box[:4], (0, 0))
+    assert not vision._inside_plate(vision.Line(0, 24, 240, 24), box[:4], (0, 0))
+
+
 def test_wedge_reference_keeps_both_boundaries():
     path = str(SAMPLES / "falling_wedge.png")
     analysis = vision.analyze_screenshot(path)
@@ -22,6 +43,17 @@ def test_wedge_reference_keeps_both_boundaries():
     assert 140 <= len(candles) <= 146 and len(lines) == 2 and not zones
     assert candles.x.iloc[0] < 10 and candles.x.iloc[-1] > 690
     assert len(similarity.reference_from_screenshot(path)["path"]) == 50
+
+
+def test_recognized_boundary_pair_is_not_reused_as_a_neckline(monkeypatch):
+    import screenshot_query
+
+    def unexpected_reversal(*args):
+        pytest.fail("Обе линии уже связаны с границами треугольника")
+
+    monkeypatch.setattr(screenshot_query, "_marked_reversals", unexpected_reversal)
+    [(_, choice)] = screenshot_query.screenshot_choices(SAMPLES / "dark_triangle.png")
+    assert choice["kind"] == "symmetric" and choice["reference"]["geometry"]
 
 
 def test_highlighted_bearish_gap():

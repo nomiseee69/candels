@@ -101,19 +101,21 @@ def _head_and_shoulders(highs, lows, closes, size, before=None, diagnostics=None
     rights.sort(key=lambda p: highs[p], reverse=True)
     for left in lefts:
         for right in rights:
-            figure = _shoulder_geometry(highs, lows, closes, size, left, head, right, record)
+            figure = _shoulder_geometry(highs, lows, closes, size, left, head, right, record, head_gap=1)
             if figure and accept(figure):
                 return figure
     record(reason="no_figure_at_neckline")
     return None
 
 
-def _shoulder_geometry(highs, lows, closes, size, left, head, right, record):
+def _shoulder_geometry(highs, lows, closes, size, left, head, right, record, *, head_gap=2):
     n = len(highs)
     t1 = left + int(np.argmin(lows[left:head + 1]))
     t2 = head + int(np.argmin(lows[head:right + 1]))
     record(shoulders=(left, right), neck_anchors=(t1, t2))
-    if min(head - left, right - head, t1 - left, head - t1, t2 - head, right - t2) < 2:
+    # Резкий ход от головы за один бар допустим только с отдельно
+    # проверяемой нарисованной шеей. Опоры и плечи остаются разными свингами.
+    if min(t1 - left, right - t2) < 2 or min(head - t1, t2 - head) < head_gap:
         record(reason="compressed_landmarks")
         return None
     neck = (lows[t1] + lows[t2]) / 2
@@ -203,8 +205,11 @@ def landmark_closes(df, figure):
     return df.close.iloc[points[0][0]:points[-1][0] + 1]
 
 
-def marked_inverse_head_shoulders(df, lines):
-    """Подтверждённая фигура у нарисованной шеи с двумя опорными максимумами."""
+def marked_head_shoulders(name, df, lines):
+    """Подтверждённая ГиП с двумя опорами на нарисованной шее."""
+    sign = -1 if name in MIRRORED else 1
+    approach_prices = sign * df["high" if sign < 0 else "low"]
+    closes = sign * df.close.to_numpy()
     sizes = atr(df).to_numpy()
     for line in lines:
         x0, x1 = line["x0"], line["x1"]
@@ -213,32 +218,37 @@ def marked_inverse_head_shoulders(df, lines):
             continue
         start = max(0, int(x0 - span * .65))
         end = min(len(df), int(np.ceil(x1 + max(3, span * .10))) + 1)
-        slope = (line["y1"] - line["y0"]) / span
+        price = sign * line["y0"]
+        slope = sign * (line["y1"] - line["y0"]) / span
         tolerance = max(2, span * .10)
 
         def accepts(figure):
             if not figure["confirmed"]:
                 return False
-            # validate() проверяет перевёрнутую фигуру в отражённых координатах.
+            # Для перевёрнутой фигуры и цены, и разметка отражены.
             left, first, head, second, right, _ = figure["points"]
-            approach = df.high.iloc[max(0, start + 2 * left[0] - head[0]):start + left[0]]
-            if approach.empty or float(approach.max()) + left[1] < ARRIVAL * figure["height"]:
+            approach = approach_prices.iloc[max(0, start + 2 * left[0] - head[0]):start + left[0]]
+            if approach.empty or left[1] - float(approach.min()) < ARRIVAL * figure["height"]:
                 return False
             if abs(start + first[0] - x0) > tolerance or start + second[0] > x1 + tolerance:
                 return False
             for x, y in (first, second):
-                drawn_price = line["y0"] + slope * (start + x - x0)
-                if abs(drawn_price + y) > sizes[start + x] / 2:
+                drawn_price = price + slope * (start + x - x0)
+                if abs(drawn_price - y) > sizes[start + x] / 2:
                     return False
-            fitted_slope = (first[1] - second[1]) / (second[0] - first[0])
-            return any(df.close.iloc[x] > max(line["y0"] + slope * (x - x0),
-                                              -first[1] + fitted_slope * (x - start - first[0]))
+            fitted_slope = (second[1] - first[1]) / (second[0] - first[0])
+            return any(closes[x] < min(price + slope * (x - x0),
+                                       first[1] + fitted_slope * (x - start - first[0]))
                        for x in range(start + right[0] + 1, end))
 
-        figure = validate("Перевёрнутая ГиП", df, start, end - start, sizes, accept_head_shoulders=accepts)
+        figure = validate(name, df, start, end - start, sizes, accept_head_shoulders=accepts)
         if figure:
             return figure, end - start
     return None
+
+
+def marked_inverse_head_shoulders(df, lines):
+    return marked_head_shoulders("Перевёрнутая ГиП", df, lines)
 
 
 def marked_double_reversal(name, df, lines):
