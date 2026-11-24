@@ -3,10 +3,18 @@
 from catalog import SHAPE_PATTERNS
 from fingerprint import kind_text, make_fingerprint, marked_items, visible_fvg_reference
 from shape import SHAPE_POINTS, normalize, resample
-from shapes_check import landmark_closes, marked_double_reversal, validate
+from shapes_check import landmark_closes, marked_double_reversal, marked_inverse_head_shoulders, validate
 from similarity import reference_from_analysis, reference_to_json
 from trendlines import FAMILY_BY_PATTERN, KIND_NAMES, drawn_span_has_swings, kind_from_drawing
 from vision import UnreliableScreenshot, analyze_screenshot, extract_marks
+
+
+def _shape_choice(name, df, figure, window):
+    segment = landmark_closes(df, figure)
+    if len(segment) >= 8:
+        shape = normalize(resample(segment, SHAPE_POINTS)).tolist()
+        return name, {"name": name, "shape": shape, "shape_window": window}
+    return None
 
 
 def screenshot_choices(path):
@@ -52,10 +60,9 @@ def screenshot_choices(path):
                 window = len(df)
                 figure = validate(name, df, 0, window)
             if figure:
-                segment = landmark_closes(df, figure)
-                if len(segment) >= 8:
-                    shape = normalize(resample(segment, SHAPE_POINTS)).tolist()
-                    choices.append((name, {"name": name, "shape": shape, "shape_window": window}))
+                choice = _shape_choice(name, df, figure, window)
+                if choice:
+                    choices.append(choice)
     for name in families:
         for pos, (overlap, item) in enumerate(marked_items(name, df, zones, lines)):
             if overlap < 0.70:
@@ -70,6 +77,13 @@ def screenshot_choices(path):
                     continue
             choices.append((label, {"name": name, "kind": item.get("kind"), "direction": item.get("direction"),
                                     "fingerprint": fp}))
+    # Неподтверждённая зона не должна скрывать фигуру с подтверждённой шеей.
+    if 1 <= len(lines) <= 5 and (not zones or not choices):
+        match = marked_inverse_head_shoulders(df, lines)
+        if match:
+            choice = _shape_choice("Перевёрнутая ГиП", df, *match)
+            if choice:
+                choices.append(choice)
     if not choices:
         raise UnreliableScreenshot("Свечи видны, но связать разметку с паттерном не удалось. "
                                    "Отметь границы одной фигуры или одну зону.")
