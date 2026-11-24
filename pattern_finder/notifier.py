@@ -133,8 +133,11 @@ def answer_pre_checkout(query_id, ok=True, error=None):
     return api_post("answerPreCheckoutQuery", data)
 
 
-def answer_callback(callback_id):
-    HTTP.post(f"{API}/answerCallbackQuery", data={"callback_query_id": callback_id}, timeout=10)
+def answer_callback(callback_id, text=None):
+    data = {"callback_query_id": callback_id}
+    if text:
+        data["text"] = text
+    HTTP.post(f"{API}/answerCallbackQuery", data=data, timeout=10)
 
 
 def tradingview_link(symbol, interval):

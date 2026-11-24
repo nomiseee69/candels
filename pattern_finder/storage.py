@@ -197,7 +197,7 @@ def backup(now=None):
 
 @locked
 def add_pattern(chat_id, name, photo_path, note="", kind=None, reference=None, shape=None, builtin=False,
-                fingerprint=None):
+                fingerprint=None, direction=None, shape_window=None, neck_template=None):
     """Сохраняет пример паттерна и возвращает его id. Примеров одного паттерна может быть много.
     kind — тип фигуры с рисунка пользователя (например, "symmetric"), если линии нарисованы;
     reference / shape — эталон, снятый прямо с рынка (кнопка «💾 Сохранить как пример»);
@@ -217,6 +217,9 @@ def add_pattern(chat_id, name, photo_path, note="", kind=None, reference=None, s
         entry["builtin"] = True
     if fingerprint is not None:
         entry["fingerprint"] = fingerprint
+    for key, value in (("direction", direction), ("shape_window", shape_window), ("neck_template", neck_template)):
+        if value is not None:
+            entry[key] = value
     user["patterns"].append(entry)
     save_users(users)
     return pattern_id

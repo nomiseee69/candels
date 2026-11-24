@@ -46,8 +46,8 @@ def test_chat_photo_confirm_once(chat, filename, kind, field):
     rec, downloads, scans = chat
     upload(filename)
     text, kb = rec.sent[-1]
-    actions = [cb for cb in datas(kb) if cb.startswith("query:")]
-    assert len(actions) == 1 and "Искать похожие" in text and not scans
+    actions = [cb for cb in datas(kb) if cb.startswith("qdo:")]
+    assert len(actions) == 2 and "Найти похожие" in [b["text"] for b in buttons(kb)] and not scans
     press(actions[0], chat_id=CHAT + 1)
     assert not scans
     press(actions[0], chat_id=CHAT)
@@ -61,10 +61,12 @@ def test_one_clarification_reuses_selected_zone(chat):
     rec, downloads, scans = chat
     upload("real_tv_light_table.png")
     text, kb = rec.sent[-1]
-    options = [b for b in buttons(kb) if b["callback_data"].startswith("query:")]
+    options = [b for b in buttons(kb) if b["callback_data"].startswith("qpick:")]
     assert text.count("?") == 1 and len(options) >= 2 and not scans
     choice = next(b for b in options if "медвежий OB" in b["text"])
     press(choice["callback_data"], chat_id=CHAT)
+    assert not scans
+    press(datas(rec.edited[-1][1])[0], chat_id=CHAT)
     assert len(downloads) == len(scans) == 1
     assert scans[0][1]["name"] == "Order Block" and not scans[0][1]["fingerprint"]["bullish"]
 
@@ -84,9 +86,11 @@ def test_sections_and_tutorial(chat, monkeypatch):
     rec, _, _ = chat
     bot.handle_message({"text": "/start", "chat": {"id": CHAT}})
     assert rec.sent[-1][0].startswith(bot.WELCOME)
-    assert "📖 Как сделать скриншот" in [b["text"] for b in buttons(rec.sent[-1][1])]
+    assert datas(rec.sent[-1][1]) == ["my", "profile"]
     press("profile", chat_id=CHAT)
-    assert {"settings", "learn", "sub", "help"} <= set(datas(rec.edited[-1][1]))
+    assert set(datas(rec.edited[-1][1])) == {"settings", "sub", "menu"}
+    press("advanced", chat_id=CHAT)
+    assert {"set:learn", "set:quality", "help"} <= set(datas(rec.edited[-1][1]))
     press("auto_section", chat_id=CHAT)
     assert not storage.get_autoscan(CHAT) and "auto" in datas(rec.edited[-1][1])
     press("shot:0", chat_id=CHAT)
@@ -141,7 +145,7 @@ def test_scan_uses_only_query_and_explains_result(monkeypatch, tmp_path):
         caption, kb = rec.photos[0]
         assert all(part in caption for part in ("SOLUSDT", "4H", "81%", "между тенями"))
         assert len(rec.edited) >= 2 and not rec.sent
-        assert {"search", f"vote:{cid}:1", f"vote:{cid}:-1"} <= set(datas(kb))
+        assert {f"more:{cid}", f"vote:{cid}:1", f"vote:{cid}:-1"} <= set(datas(kb))
         assert any("tradingview.com" in b.get("url", "") for b in buttons(kb))
         bot.record_vote(CHAT, coin, 0, -1, quiet=True)
         record, = storage.get_feedback(CHAT)
@@ -180,5 +184,24 @@ def test_unmarked_candles_offer_verified_reference_without_second_upload(chat, m
     assert "слева направо" in text and not scans
     choice = next(b for b in buttons(keyboard) if "CHoCH" in b["text"])
     press(choice["callback_data"], chat_id=CHAT)
+    assert not scans
+    press(datas(rec.edited[-1][1])[0], chat_id=CHAT)
     assert len(scans) == len(downloads) == 1
     assert scans[0][1]["fingerprint"]["window"]
+
+
+
+def test_photo_save_preserves_reference_and_consumes_session(chat, tmp_path, monkeypatch):
+    rec, downloads, scans = chat
+    monkeypatch.setattr(bot, "PATTERNS_DIR", str(tmp_path))
+    upload("falling_wedge.png")
+    search, save = datas(rec.sent[-1][1])
+    press(save, chat_id=CHAT + 1)
+    assert not storage.get_patterns(CHAT + 1)
+    press(save, chat_id=CHAT)
+    press(save, chat_id=CHAT)
+    press(search, chat_id=CHAT)
+    saved, = storage.get_patterns(CHAT)
+    assert saved["kind"] == "falling_wedge" and saved["reference"]["geometry"]
+    assert Path(saved["photo"]).is_file()
+    assert downloads == ["falling_wedge.png"] and not scans

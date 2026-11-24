@@ -199,14 +199,14 @@ def test_free_profile_and_old_patterns(tmp_path, monkeypatch):
             storage.add_pattern(5, name, None, builtin=True)
         storage.update_user(5, lambda u: u.update(autoscan=True))
         text, _ = bot.profile_view(5)
-        assert "пробный период" in text and "осталось 3 дн." in text and "После окончания: тариф Free" in text
+        assert "пробный период" in text and "осталось 3 дн." in text
         storage.update_user(5, lambda u: u["sub"].update(until=now - 1))
         billing.reminders(now)                                         # «Pro закончился» — автоскан выключен
         assert not storage.get_autoscan(5)
         assert [p["name"] for p in bot.search_patterns(5)] == ["FVG", "BOS"]
         text, _ = bot.profile_view(5)
-        assert "Тариф: Free" in text and "Канал" in text and "Сканов сегодня осталось: 3 из 3" in text
-        assert "Free" in bot.menu_text(5)
+        assert "Free" in text and "сканов сегодня 3 из 3" in text
+        assert bot.menu_text(5) == bot.WELCOME
         names = [b["text"] for row in bot.autoscan_view(5)[1]["inline_keyboard"] for b in row]
         assert "🔒 Включить с Pro" in names
         billing.extend(5, 30, source="stars")
@@ -283,7 +283,7 @@ def test_paid_user_really_gets_pro(tmp_path, monkeypatch):
             **invoice, "telegram_payment_charge_id": "real1", "subscription_expiration_date": int(now + 30 * DAY)}})
         assert billing.is_pro(5) and len(bot.search_patterns(5)) == 3
         text, _ = bot.profile_view(5)
-        assert "💎 Pro" in text and "осталось 30 дн." in text and "продлится" not in text and "автоматически" in text
+        assert "Pro" in text and "осталось 30 дн." in text and "автопродление" in text
         bot.handle_callback({"id": "c", "data": "auto", "message": {"chat": {"id": 5}, "message_id": 3}})
         assert storage.get_autoscan(5)                                   # автоскан теперь можно
         # продление через 30 дней: Telegram присылает новый successful_payment
