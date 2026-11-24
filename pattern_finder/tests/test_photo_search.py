@@ -111,7 +111,8 @@ def test_scan_uses_only_query_and_explains_result(monkeypatch, tmp_path):
     monkeypatch.setattr(storage, "FILE", str(tmp_path / "users.json"))
     storage.add_pattern(CHAT, "BOS", None, builtin=True)
     original_settings = storage.get_settings(CHAT)
-    query = {"name": "FVG", "kind": "bearish_fvg", "fingerprint": {"family": "fvg"}}
+    query = {"name": "FVG", "kind": "bearish_fvg", "fingerprint": {"family": "fvg"},
+             "photo": "private.jpg", "note": "private caption"}
     df = df_with_times()
     def scan(patterns, intervals, symbols, settings, judge):
         assert patterns == [query] and settings["similar_only"] and not settings["combos_only"]
@@ -142,6 +143,12 @@ def test_scan_uses_only_query_and_explains_result(monkeypatch, tmp_path):
         assert len(rec.edited) >= 2 and not rec.sent
         assert {"search", f"vote:{cid}:1", f"vote:{cid}:-1"} <= set(datas(kb))
         assert any("tradingview.com" in b.get("url", "") for b in buttons(kb))
+        bot.record_vote(CHAT, coin, 0, -1, quiet=True)
+        record, = storage.get_feedback(CHAT)
+        assert (record["symbol"], record["interval"], record["result_position"],
+                record["similarity"], record["vote"]) == ("SOLUSDT", "4h", 1, .81, -1)
+        assert record["query_reference"] == {
+            "name": "FVG", "kind": "bearish_fvg", "direction": "down", "fingerprint": {"family": "fvg"}}
         del coin["frames"][0]["items"][0]["similarity"]
         assert "%" not in bot.viewer_caption(coin, cid)
         assert storage.get_settings(CHAT) == original_settings

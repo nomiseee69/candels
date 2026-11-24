@@ -1908,6 +1908,26 @@ def votes_of(chat_id):
     return {r["key"]: r["vote"] for r in get_feedback(chat_id)}
 
 
+def feedback_reference(example):
+    """Числовой эталон исходного запроса без файла фото и подписи пользователя."""
+    name, kind = example["name"], example.get("kind")
+    orientation = {
+        "ascending": "up", "descending": "down", "channel_up": "up", "channel_down": "down",
+        "channel_flat": "flat", "eqh": "down", "eql": "up", "rising_wedge": "up", "falling_wedge": "down",
+        "Двойное дно": "up", "Перевёрнутая ГиП": "up", "Двойная вершина": "down", "Голова и плечи": "down",
+    }
+    result = {"name": name, "kind": kind,
+              "direction": example.get("direction") or direction(example) or orientation.get(kind or name)}
+    for key in ("shape", "shape_window", "neck_template"):
+        if key in example:
+            result[key] = example[key]
+    for key, fields in (("reference", ("geometry", "path", "visible_span")),
+                        ("fingerprint", ("family", "features", "window", "bullish"))):
+        if example.get(key):
+            result[key] = {k: example[key][k] for k in fields if k in example[key]}
+    return result
+
+
 def record_vote(chat_id, coin, index, vote, quiet=False):
     """Запоминает оценку находки, сразу переучивается и рассказывает, ЧТО изменилось.
     Возвращает текст ответа (его же и присылает, если quiet=False)."""
@@ -1923,6 +1943,12 @@ def record_vote(chat_id, coin, index, vote, quiet=False):
               "features": features(df, item), "window": item_window(df, item),
               "factors": item.get("factors"), "group": item.get("group"),
               "facts": language.present(df, item), "direction": direction, "kind": item.get("kind")}
+    if coin.get("result_position") is not None:
+        record["result_position"] = coin["result_position"]
+    if item.get("similarity") is not None:
+        record["similarity"] = float(item["similarity"])
+    if coin.get("query_example"):
+        record["query_reference"] = feedback_reference(coin["query_example"])
     if vote > 0:                                                      # 👍 — ещё один пример
         try:
             if name in FAMILY:
@@ -2381,7 +2407,8 @@ def send_cards(chat_id, coins, title=None, edit_id=None):
     if not coins:
         return
     now = time.time()
-    for coin in coins:
+    for position, coin in enumerate(coins, start=1):
+        coin["result_position"] = position
         coin.setdefault("found_at", now)             # для поиска и подписи: «скан в 14:05»
     ids = remember_cards(chat_id, coins)
     for coin in coins:
