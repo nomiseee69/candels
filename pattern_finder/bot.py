@@ -43,7 +43,7 @@ from feedback import (MIN_VOTES_FIT, features, item_window, learn, make_judge, r
                       what_changed, with_learning)
 from feedback import summary as learning_summary
 from similarity import SIMILAR_ENOUGH, example_from_item
-from screenshot_query import screenshot_choices
+from screenshot_query import UnmarkedChart, manual_choices, screenshot_choices
 from fingerprint import FAMILY, describe as describe_fingerprint, kind_text, make_fingerprint, range_from_box, screenshot_fingerprint
 from vision import UnreliableScreenshot, extract_candles, extract_marks, extract_range
 import billing
@@ -1728,11 +1728,15 @@ def inspect_chat_photo(chat_id, file_id):
         photo_queries.move_to_end(chat_id)
         if len(photo_queries) > 512:
             photo_queries.popitem(last=False)
+    manual = False
     try:
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "chart.jpg")
             download_photo(file_id, path)
             choices = screenshot_choices(path)
+    except UnmarkedChart as error:
+        choices, reason = manual_choices(error.df), str(error)
+        manual = True
     except UnreliableScreenshot as error:
         choices, reason = [], str(error)
     except (ValueError, OSError) as error:
@@ -1752,7 +1756,9 @@ def inspect_chat_photo(chat_id, file_id):
         return
     single = len(choices) == 1
     text = f"Вижу {choices[0][0]}. Искать похожие графики?" if single else "Какой из отмеченных паттернов искать?"
-    rows = [[{"text": "🔍 Искать похожие" if single else label, "callback_data": f"query:{token}:{i}"}]
+    if manual:
+        text = "Какой участок искать? Свечи пронумерованы слева направо."
+    rows = [[{"text": "🔍 Искать похожие" if single and not manual else label, "callback_data": f"query:{token}:{i}"}]
             for i, (label, _) in enumerate(choices)]
     send_message(text, chat_id, {"inline_keyboard": rows + [[GUIDE_BUTTON, TO_MENU]]})
 

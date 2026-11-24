@@ -159,3 +159,19 @@ def test_one_off_scan_respects_free_pattern_limit(tmp_path, monkeypatch):
     quota = bot.billing.scans_left(CHAT)
     bot.run_scan(CHAT, {"name": "Канал", "kind": "channel_down"})
     assert walls == ["patterns"] and bot.billing.scans_left(CHAT) == quota
+
+
+def test_unmarked_candles_offer_verified_reference_without_second_upload(chat, monkeypatch):
+    import screenshot_query
+    from test_structure import ZIGZAG, path
+
+    rec, downloads, scans = chat
+    df = path(ZIGZAG)
+    monkeypatch.setattr(screenshot_query, "extract_marks", lambda _: (df, [], []))
+    upload("bearish_fvg.png")
+    text, keyboard = rec.sent[-1]
+    assert "слева направо" in text and not scans
+    choice = next(b for b in buttons(keyboard) if "CHoCH" in b["text"])
+    press(choice["callback_data"], chat_id=CHAT)
+    assert len(scans) == len(downloads) == 1
+    assert scans[0][1]["fingerprint"]["window"]

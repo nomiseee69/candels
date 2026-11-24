@@ -1,7 +1,7 @@
 """Разовые эталоны для поиска по фотографии в чате."""
 
-from catalog import SHAPE_PATTERNS
-from fingerprint import kind_text, make_fingerprint, marked_items, visible_fvg_reference
+from catalog import FLAG_PATTERNS, RULE_PATTERNS, SHAPE_PATTERNS
+from fingerprint import kind_text, make_fingerprint, marked_items, screenshot_fingerprint, visible_fvg_reference
 from shape import SHAPE_POINTS, normalize, resample
 from shapes_check import landmark_closes, marked_double_reversal, marked_head_shoulders, validate
 from similarity import reference_from_analysis, reference_to_json
@@ -32,6 +32,36 @@ def _marked_reversals(df, lines):
             choice = _shape_choice(name, df, *match)
             if choice:
                 yield choice
+
+
+class UnmarkedChart(UnreliableScreenshot):
+    """Reliable candles without a validated automatic choice."""
+
+    def __init__(self, df):
+        super().__init__("Свечи видны. Выдели границы паттерна или зону на графике.")
+        self.df = df
+
+
+def manual_choices(df):
+    choices = []
+    for name in RULE_PATTERNS + FLAG_PATTERNS:
+        fp, item = screenshot_fingerprint(name, df)
+        if fp is None:
+            continue
+        bounds = df.attrs.get("price_pixel_bounds")
+        if bounds is not None:
+            bars = df.iloc[item["start"]:item["end"] + 1]
+            if bars.low.min() <= bounds[0] or bars.high.max() >= bounds[1]:
+                continue
+        if name == "FVG":
+            fp = visible_fvg_reference(fp, df, item)
+        if not fp or not fp.get("window"):
+            continue
+        first, last = item["start"] + 1, item["end"] + 1
+        choices.append((f"{kind_text(item)} · свечи {first}–{last}",
+                        {"name": name, "kind": item.get("kind"), "direction": item.get("direction"),
+                         "fingerprint": fp}))
+    return choices
 
 
 def screenshot_choices(path):
@@ -93,6 +123,8 @@ def screenshot_choices(path):
     has_boundary_pair = any("reference" in query for _, query in choices)
     if lines and (not zones or not choices) and not has_boundary_pair:
         choices.extend(_marked_reversals(df, [line for line in lines if not line.get("zone")]))
+    if not choices and not zones and not lines:
+        raise UnmarkedChart(df)
     if not choices:
         raise UnreliableScreenshot("Свечи видны, но связать разметку с паттерном не удалось. "
                                    "Отметь границы одной фигуры или одну зону.")
