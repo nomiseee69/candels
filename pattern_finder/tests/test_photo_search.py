@@ -47,7 +47,7 @@ def test_chat_photo_confirm_once(chat, filename, kind, field):
     upload(filename)
     text, kb = rec.sent[-1]
     actions = [cb for cb in datas(kb) if cb.startswith("qdo:")]
-    assert len(actions) == 2 and "Найти похожие" in [b["text"] for b in buttons(kb)] and not scans
+    assert len(actions) == 2 and "🔍 Найти похожие" in [b["text"] for b in buttons(kb)] and not scans
     press(actions[0], chat_id=CHAT + 1)
     assert not scans
     press(actions[0], chat_id=CHAT)

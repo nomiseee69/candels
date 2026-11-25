@@ -249,14 +249,14 @@ def outdated(chat_id):
 
 # --- главное меню ----------------------------------------------------------------------------
 def menu_keyboard(chat_id=None):
-    return {"inline_keyboard": [[{"text": "Мои паттерны", "callback_data": "my"},
-                                 {"text": "Профиль", "callback_data": "profile"}]]}
+    return {"inline_keyboard": [[{"text": "📂 Мои паттерны", "callback_data": "my"},
+                                 {"text": "👤 Профиль", "callback_data": "profile"}]]}
 
 
 GUIDE_BUTTON = {"text": "📖 Как сделать скриншот", "callback_data": "tutorial:0"}
 SEARCH_VIEW = ("Отправь фото графика с выделенной фигурой или зоной.",
                {"inline_keyboard": [[GUIDE_BUTTON], [{"text": "По сохранённым", "callback_data": "scan"}],
-                                    [{"text": "Найти монету", "callback_data": "find"},
+                                    [{"text": "🔍 Найти монету", "callback_data": "find"},
                                      {"text": "История", "callback_data": "history"}], [TO_MENU]]})
 
 
@@ -293,13 +293,13 @@ def plan_line(chat_id):
 
 
 def profile_view(chat_id):
-    lines = [f"Профиль\n{plan_line(chat_id)}"]
+    lines = [f"👤 Профиль\n{plan_line(chat_id)}"]
     discount = discounts.active(chat_id)
     if discount:
-        lines.append(f"Персональная скидка {discount['percent']}% на одну оплату Pro.")
+        lines.append(f"🎁 Персональная скидка {discount['percent']}% на одну оплату Pro.")
     return "\n".join(lines), {"inline_keyboard": [
-        [{"text": "Подписка", "callback_data": "sub"}, {"text": "Настройки", "callback_data": "settings"}],
-        [{"text": "Назад", "callback_data": "menu"}],
+        [{"text": "💎 Подписка", "callback_data": "sub"}, {"text": "⚙️ Настройки", "callback_data": "settings"}],
+        [{"text": "⬅️ Назад", "callback_data": "menu"}],
     ]}
 
 
@@ -336,8 +336,8 @@ def subscription_view(chat_id):
     rows = [r for r in rows if r]
     if not rows:
         lines.append("\nОплата сейчас недоступна — напиши администратору.")
-    rows.append([{"text": "История оплат", "callback_data": "payments_history"}])
-    rows.append([{"text": "Назад", "callback_data": "profile"}])
+    rows.append([{"text": "⭐ История оплат", "callback_data": "payments_history"}])
+    rows.append([{"text": "⬅️ Назад", "callback_data": "profile"}])
     return "\n".join(lines), {"inline_keyboard": rows}
 
 
@@ -821,12 +821,12 @@ def my_patterns_view(chat_id):
     rows = _grid([{"text": name, "callback_data": f"gal:{i}:0"}
                   for i, name in enumerate(ALL_PATTERNS) if name in names])
     if rows:
-        text = "Мои паттерны"
-        rows.append([{"text": "Искать по сохранённым", "callback_data": "scan"},
-                     {"text": "Автоскан", "callback_data": "auto_section"}])
+        text = "📂 Мои паттерны"
+        rows.append([{"text": "🔍 Искать по сохранённым", "callback_data": "scan"},
+                     {"text": "🔔 Автоскан", "callback_data": "auto_section"}])
     else:
         text = "У тебя пока нет сохранённых паттернов. Отправь скриншот графика, чтобы добавить первый."
-    rows += [[{"text": "Каталог", "callback_data": "catalog"}], [TO_MENU]]
+    rows += [[{"text": "📋 Каталог", "callback_data": "catalog"}], [TO_MENU]]
     return text, {"inline_keyboard": rows}
 
 
@@ -866,16 +866,16 @@ def gallery_view(chat_id, index, pos, more=False):
         rows.append([{"text": "◀️", "callback_data": f"gal:{index}:{(pos - 1) % n}"},
                      {"text": "▶️", "callback_data": f"gal:{index}:{(pos + 1) % n}"}])
     if more:
-        rows.append([{"text": "✏️ Описать словами", "callback_data": f"describe:{example['id']}"}])
+        rows.append([{"text": "✏️ Редактировать описание", "callback_data": f"describe:{example['id']}"}])
         rows.append([{"text": "🗑 Удалить этот пример", "callback_data": f"gask:{example['id']}"},
                      {"text": "📷 Добавить скрин", "callback_data": f"shot:{index}"}])
         rows.append([{"text": "👀 Пример с рынка", "callback_data": f"demo:{index}"},
                      {"text": "🗑 Удалить целиком", "callback_data": f"gall:{index}"}])
-        rows.append([{"text": "Назад", "callback_data": f"gal:{index}:{pos}"}])
+        rows.append([{"text": "⬅️ Назад", "callback_data": f"gal:{index}:{pos}"}])
     else:
-        rows += [[{"text": "Найти похожие", "callback_data": f"gscan:{example['id']}"}],
-                 [{"text": "Другие действия", "callback_data": f"gmore:{index}:{pos}"}],
-                 [{"text": "Назад", "callback_data": "my"}]]
+        rows += [[{"text": "🔍 Найти похожие", "callback_data": f"gscan:{example['id']}"}],
+                 [{"text": "⋯ Другие действия", "callback_data": f"gmore:{index}:{pos}"}],
+                 [{"text": "⬅️ Назад", "callback_data": "my"}]]
     return example.get("photo"), caption, {"inline_keyboard": rows}
 
 
@@ -1130,10 +1130,10 @@ def quality_status():
 def settings_keyboard(chat_id, advanced=False):
     if not advanced:
         return {"inline_keyboard": [
-            [{"text": "Таймфреймы", "callback_data": "tf"},
-             {"text": f"Монеты · топ-{get_coins(chat_id)}", "callback_data": "coins"}],
-            [{"text": "Расширенные настройки", "callback_data": "advanced"}],
-            [{"text": "Назад", "callback_data": "profile"}],
+            [{"text": "⏱ Таймфреймы", "callback_data": "tf"},
+             {"text": f"🪙 Монеты · топ-{get_coins(chat_id)}", "callback_data": "coins"}],
+            [{"text": "🎛 Расширенные настройки", "callback_data": "advanced"}],
+            [{"text": "⬅️ Назад", "callback_data": "profile"}],
         ]}
     settings = get_settings(chat_id)
     yes = lambda key: "да" if settings[key] else "нет"
@@ -1149,12 +1149,12 @@ def settings_keyboard(chat_id, advanced=False):
           "callback_data": "set:quality"}],
         [{"text": "Обучение", "callback_data": "learn"}, {"text": "Справка", "callback_data": "help"},
          {"text": "О настройках", "callback_data": "sethelp"}],
-        [{"text": "Назад", "callback_data": "settings"}],
+        [{"text": "⬅️ Назад", "callback_data": "settings"}],
     ]}
 
 
 def settings_view(chat_id):
-    return "Настройки", settings_keyboard(chat_id)
+    return "⚙️ Настройки", settings_keyboard(chat_id)
 
 
 COINS_TEXT = ("🪙 Сколько самых торгуемых монет Binance проверять? Чем больше — тем дольше "
@@ -1184,12 +1184,12 @@ def interval_keyboard(chat_id):
 
 # --- приём фото ------------------------------------------------------------------------
 def saved_keyboard(index):
-    return {"inline_keyboard": [[{"text": "Мои паттерны", "callback_data": "my"},
-                                 {"text": "Искать по сохранённым", "callback_data": "scan"}]]}
+    return {"inline_keyboard": [[{"text": "📂 Мои паттерны", "callback_data": "my"},
+                                 {"text": "🔍 Искать по сохранённым", "callback_data": "scan"}]]}
 
 
 def retry_keyboard(index):
-    return {"inline_keyboard": [[GUIDE_BUTTON], [{"text": "Назад", "callback_data": "my"}]]}
+    return {"inline_keyboard": [[GUIDE_BUTTON], [{"text": "⬅️ Назад", "callback_data": "my"}]]}
 
 
 def drawn_levels(path):
@@ -1217,7 +1217,7 @@ def example_keyboard(pattern_id, item=None):
     if kind.startswith(("bullish", "bearish")):        # бот понял направление наоборот — поправь одной кнопкой
         other = "медвежий" if kind.startswith("bullish") else "бычий"
         rows.append([{"text": f"🔄 Нет, это {other}", "callback_data": f"flipdir:{pattern_id}"}])
-    rows.append([{"text": "✏️ Описать словами", "callback_data": f"describe:{pattern_id}"}])
+    rows.append([{"text": "✏️ Редактировать описание", "callback_data": f"describe:{pattern_id}"}])
     return {"inline_keyboard": rows}
 
 
@@ -1238,7 +1238,7 @@ def flip_direction(chat_id, message_id, pattern_id):
     word = "бычий" if str(kind).startswith("bullish") else "медвежий"
     edit_keyboard(chat_id, message_id, {"inline_keyboard": [
         [{"text": f"✅ Запомнил: {word}", "callback_data": f"ok:{pattern_id}"}],
-        [{"text": "✏️ Описать словами", "callback_data": f"describe:{pattern_id}"}]]})
+        [{"text": "✏️ Редактировать описание", "callback_data": f"describe:{pattern_id}"}]]})
     send_message(f"Понял, это {word} «{example['name']}». Буду искать такие.", chat_id,
                  saved_keyboard(ALL_PATTERNS.index(example["name"])) if example["name"] in ALL_PATTERNS
                  else {"inline_keyboard": [[TO_MENU]]})
@@ -1714,22 +1714,22 @@ def inspect_chat_photo(chat_id, file_id):
         else:
             del photo_queries[chat_id]
     if not choices:
-        send_message(reason, chat_id, {"inline_keyboard": [[GUIDE_BUTTON], [TO_MENU]]})
+        send_message(f"❌ {reason}", chat_id, {"inline_keyboard": [[GUIDE_BUTTON], [TO_MENU]]})
         return
     if len(choices) == 1:
         show_view(chat_id, None, photo_actions(token, choices[0][0]))
         return
-    text = ("Какой участок искать? Свечи пронумерованы слева направо." if manual
-            else "Какой паттерн ты выделил?")
+    text = ("🔍 Какой участок искать? Свечи пронумерованы слева направо." if manual
+            else "🔍 Какой паттерн ты выделил?")
     rows = [[{"text": label, "callback_data": f"qpick:{token}:{i}"}]
             for i, (label, _) in enumerate(choices)]
     send_message(text, chat_id, {"inline_keyboard": rows})
 
 
 def photo_actions(token, label):
-    return label, {"inline_keyboard": [[
-        {"text": "Найти похожие", "callback_data": f"qdo:{token}:search"},
-        {"text": "Сохранить", "callback_data": f"qdo:{token}:save"},
+    return f"📊 {label}", {"inline_keyboard": [[
+        {"text": "🔍 Найти похожие", "callback_data": f"qdo:{token}:search"},
+        {"text": "💾 Сохранить", "callback_data": f"qdo:{token}:save"},
     ]]}
 
 
@@ -1768,8 +1768,8 @@ def confirm_chat_photo(chat_id, token, action, message_id, index=None):
                     remove_file(path)
                     raise
         if allowed:
-            say(chat_id, message_id, f"Сохранено — {example['name']}",
-                {"inline_keyboard": [[{"text": "Мои паттерны", "callback_data": "my"}]]})
+            say(chat_id, message_id, f"✅ Сохранено — {example['name']}",
+                {"inline_keyboard": [[{"text": "📂 Мои паттерны", "callback_data": "my"}]]})
         else:
             paywall(chat_id, "patterns")
     else:
@@ -2013,7 +2013,7 @@ def vote_card(chat_id, card_id, vote, message_id=None, callback_id=None):
     coin = find_card(chat_id, card_id)
     if coin is None:
         if callback_id:
-            answer_callback(callback_id, "Карточка устарела")
+            answer_callback(callback_id, "⚠️ Карточка устарела")
         else:
             outdated(chat_id)
         return
@@ -2021,7 +2021,7 @@ def vote_card(chat_id, card_id, vote, message_id=None, callback_id=None):
     if len(entries) == 1:
         record_vote(chat_id, coin, 0, vote, quiet=True)
         if callback_id:
-            answer_callback(callback_id, "Оценка сохранена")
+            answer_callback(callback_id, "✅ Оценка сохранена")
         if message_id is not None:
             edit_keyboard(chat_id, message_id, card_keyboard(card_id, coin, chat_id))
         return
@@ -2287,38 +2287,40 @@ def results_view(chat_id, sid, page=0):
 def card_keyboard(card_id, coin, chat_id=None, more=False):
     ids = session_ids(coin, card_id)
     if more:
-        rows = [[{"text": "Подробно", "callback_data": f"det:{card_id}"},
-                 {"text": "Разметка Pine", "callback_data": f"pine:{card_id}"}]]
+        rows = [[{"text": "📄 Подробно", "callback_data": f"det:{card_id}"},
+                 {"text": "📈 Разметка Pine", "callback_data": f"pine:{card_id}"}]]
         if not coin.get("history"):
-            rows.append([{"text": "Паттерны", "callback_data": f"pats:{card_id}"}])
+            rows.append([{"text": "📂 Паттерны", "callback_data": f"pats:{card_id}"}])
             for i, (tf, item, df) in enumerate(coin_entries(coin)):
                 if market_example(df, item) is not None:
-                    rows.append([{"text": f"Сохранить · {tf.upper()} · {short_item(item)}",
+                    rows.append([{"text": f"💾 Сохранить · {tf.upper()} · {short_name(item)}",
                                   "callback_data": f"ex:{card_id}:{i}"}])
         if len(ids) > 1:
-            rows.append([{"text": "Список монет", "callback_data": f"list:{ids[0]}"}])
-        return {"inline_keyboard": rows + [[{"text": "Назад", "callback_data": f"cardmain:{card_id}"}]]}
+            rows.append([{"text": "📋 Список монет", "callback_data": f"list:{ids[0]}"}])
+        return {"inline_keyboard": rows + [[{"text": "⬅️ Назад", "callback_data": f"cardmain:{card_id}"}]]}
 
     rows = []
     frames = coin.get("frames") or []
     if frames and frames[0].get("interval") in TV_INTERVALS:
-        rows.append([{"text": "TradingView", "url": tradingview_link(coin["symbol"], frames[0]["interval"])}])
+        rows.append([{"text": "📊 TradingView", "url": tradingview_link(coin["symbol"], frames[0]["interval"])}])
     if not coin.get("history"):
         vote = single_vote(chat_id, coin)
         rows.append([{"text": "✅ 👍" if vote == 1 else "👍", "callback_data": f"vote:{card_id}:1"},
                      {"text": "✅ 👎" if vote == -1 else "👎", "callback_data": f"vote:{card_id}:-1"}])
     if len(ids) > 1:
         i, n = ids.index(card_id), len(ids)
-        rows.append([{"text": "Назад", "callback_data": f"v:{ids[(i - 1) % n]}"},
-                     {"text": "Далее", "callback_data": f"v:{ids[(i + 1) % n]}"}])
-    rows.append([{"text": "Ещё", "callback_data": f"more:{card_id}"}, HOME])
+        rows.append([{"text": "⬅️ Назад", "callback_data": f"v:{ids[(i - 1) % n]}"},
+                     {"text": "➡️ Далее", "callback_data": f"v:{ids[(i + 1) % n]}"}])
+    rows.append([{"text": "⋯ Ещё", "callback_data": f"more:{card_id}"}, HOME])
     return {"inline_keyboard": rows}
 
 
 def short_item(item):
     """Находка коротко — только элемент анализа: «FVG ↓», «OB ↑», «Канал».
     Касания, похожесть на пример, цены зон — в «📄 Подробно»."""
-    return short_name(item)
+    label = short_name(item)
+    icon = {"up": "📈", "down": "📉"}.get(direction(item))
+    return f"{icon} {label}" if icon else label
 
 
 def viewer_caption(coin, card_id):
@@ -2564,7 +2566,7 @@ def run_scan(chat_id, example=None, edit_id=None, saved_id=None):
                                   "callback_data": "search" if example else "scan"},
                                   {"text": "⚙️ Настройки", "callback_data": "settings"}], [TO_MENU]]}
     if not cards:
-        text = "Совпадений сейчас нет."
+        text = "⚠️ Совпадений сейчас нет."
         if settings["combos_only"]:
             text += " Включено «только комбинации» — одиночные находки не показываю (⚙️ Настройки)."
         say(chat_id, wait_id, text, again)
@@ -2640,7 +2642,7 @@ def handle_callback(query):
     media = is_media(message)
     data = query["data"]
     if not data.startswith("vote:"):
-        answer_callback(query["id"], "Оценка сохранена" if data.startswith("rv:") else None)
+        answer_callback(query["id"], "✅ Оценка сохранена" if data.startswith("rv:") else None)
 
     if data == "noop":
         return
@@ -2721,20 +2723,20 @@ def handle_callback(query):
         return
 
     if data == "catalog":
-        show_view(chat_id, message_id, ("Встроенные паттерны", {"inline_keyboard":
+        show_view(chat_id, message_id, ("📋 Каталог", {"inline_keyboard":
                   _grid([{"text": name, "callback_data": f"pick:{i}"} for i, name in enumerate(ALL_PATTERNS)])
-                  + [[{"text": "Назад", "callback_data": "my"}]]}), media)
+                  + [[{"text": "⬅️ Назад", "callback_data": "my"}]]}), media)
         return
 
     if data == "advanced":
-        show_view(chat_id, message_id, ("Расширенные настройки", settings_keyboard(chat_id, advanced=True)), media)
+        show_view(chat_id, message_id, ("🎛 Расширенные настройки", settings_keyboard(chat_id, advanced=True)), media)
         return
 
     if data == "payments_history":
         lines = [f"{time.strftime('%d.%m.%Y', time.localtime(p['at']))} · {p['amount']:.0f} "
                  + ("⭐" if p["currency"] == "XTR" else "₽") for p in billing.history(chat_id)[:10]]
-        show_view(chat_id, message_id, ("История оплат\n" + ("\n".join(lines) or "Оплат пока нет."),
-                  {"inline_keyboard": [[{"text": "Назад", "callback_data": "sub"}]]}), media)
+        show_view(chat_id, message_id, ("⭐ История оплат\n" + ("\n".join(lines) or "Оплат пока нет."),
+                  {"inline_keyboard": [[{"text": "⬅️ Назад", "callback_data": "sub"}]]}), media)
         return
 
     if data in ("settings", "tf_done"):
@@ -2782,7 +2784,7 @@ def handle_callback(query):
 
     if data == "sethelp":
         show_view(chat_id, message_id, (SETTINGS_HELP, {"inline_keyboard":
-                  [[{"text": "Назад", "callback_data": "advanced"}]]}), media)
+                  [[{"text": "⬅️ Назад", "callback_data": "advanced"}]]}), media)
         return
 
     if data == "pinehelp":
