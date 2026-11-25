@@ -5,14 +5,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=__USER__
-WorkingDirectory=__DIR__
-ExecStart=__DIR__/.venv/bin/python mini_app.py
+User=root
+WorkingDirectory=/root/candels/pattern_finder
+ExecStart=/root/candels/pattern_finder/.venv/bin/python mini_app.py
 Restart=on-failure
 RestartSec=5
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/root/candels/pattern_finder
 
 [Install]
 WantedBy=multi-user.target

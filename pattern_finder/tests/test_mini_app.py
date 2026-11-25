@@ -84,7 +84,9 @@ def test_invoice_binding_settlement_and_refund(monkeypatch, plan):
     assert not billing.check_pre_checkout({**event, "total_amount": 1})
     assert billing.check_pre_checkout(event)
     assert not mini_app.state(BUYER, issued["payload"])["paid"]
-    assert billing.stars_paid(BUYER + 1, event) is None
+    wrong = {**event, "telegram_payment_charge_id": "wrong-user"}
+    assert "поддержка" in billing.stars_paid(BUYER + 1, wrong)
+    assert not mini_app.state(BUYER + 1)["pro"]
     assert billing.stars_paid(BUYER, event, now)
     assert billing.stars_paid(BUYER, event, now) is None
     assert mini_app.state(BUYER, issued["payload"])["paid"]
@@ -121,3 +123,64 @@ def test_discount_order_and_official_audit():
                                         ("refund", 1, amount, -225 * 10**9, 1, -25 * 10**9)]
     with storage.transaction() as db:
         assert not db.execute("SELECT name FROM sqlite_master WHERE name LIKE 'referral_%'").fetchall()
+
+
+def test_shared_gate_trial_parallel_and_cancel():
+    from concurrent.futures import ThreadPoolExecutor
+    import mini_orders
+    import subscription_guard as guard
+
+    now = int(time.time())
+    billing.status(BUYER, now)
+    with ThreadPoolExecutor(2) as pool:
+        quotes = list(pool.map(lambda _: mini_app.invoice(BUYER, "month", False, mock_invoice), range(2)))
+    assert quotes[0]["payload"] == quotes[1]["payload"]
+    native = {"id": "native", "from": {"id": BUYER}, "invoice_payload": quotes[0]["payload"],
+              "currency": "XTR", "total_amount": 500}
+    legacy = {**native, "id": "legacy", "invoice_payload": "pro_month_500"}
+    assert billing.check_pre_checkout(native)
+    assert not billing.check_pre_checkout(legacy)
+    assert mini_orders.checkout(native, now + mini_orders.TTL + 5) is False
+    payment = {**native, "telegram_payment_charge_id": "initial", "is_first_recurring": True,
+               "is_recurring": True, "subscription_expiration_date": now + 30 * billing.DAY}
+    assert billing.stars_paid(BUYER, payment, now)
+    assert not billing.check_pre_checkout(legacy)
+    with pytest.raises(ValueError, match="уже оплачен"):
+        mini_app.invoice(BUYER, "year", False, mock_invoice)
+    calls = []
+    for _ in range(2):
+        mini_app.cancel_renewal(BUYER, lambda method, data: calls.append((method, data)) or {"ok": True})
+    assert calls == [("editUserStarSubscription", {
+        "user_id": BUYER, "telegram_payment_charge_id": "initial", "is_canceled": True})]
+    assert mini_app.state(BUYER)["cancelled"]
+    assert billing.status(BUYER)["until"] == payment["subscription_expiration_date"]
+    extra = {**legacy, "telegram_payment_charge_id": "extra", "is_first_recurring": True,
+             "subscription_expiration_date": payment["subscription_expiration_date"]}
+    assert "возврат" in billing.stars_paid(BUYER, extra, now)
+    guard.process_conflicts(lambda method, data: calls.append((method, data)) or {"ok": True})
+    assert [method for method, _ in calls] == ["editUserStarSubscription", "editUserStarSubscription", "refundStarPayment"]
+    assert billing.status(BUYER)["until"] == payment["subscription_expiration_date"]
+    assert mini_orders.create(BUYER, "year", 4800, now + 31 * billing.DAY)
+
+
+def test_existing_schema_preserves_settings_and_shared_database(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    with storage.transaction() as db:
+        db.execute("INSERT INTO users VALUES (?,?)", (str(BUYER), '{"settings":{"coins":42},"patterns":[]}'))
+    signed_invoice = mini_app.invoice(BUYER, "year", False, mock_invoice)
+    script = ("import sys, storage, mini_orders; storage.FILE=sys.argv[1]; "
+              "assert mini_orders.create(8123,'year',4800)==sys.argv[2]")
+    subprocess.run([sys.executable, "-c", script, storage.FILE, signed_invoice["payload"]],
+                   env={**os.environ, "PYTHON_DOTENV_DISABLED": "1"}, check=True)
+    script = ("import sys,time,storage; storage.FILE=sys.argv[1]; "
+              "db=storage._connect(); db.execute('BEGIN IMMEDIATE'); "
+              "print('locked',flush=True); time.sleep(.5); db.commit(); db.close()")
+    with subprocess.Popen([sys.executable, "-c", script, storage.FILE],
+                          stdout=subprocess.PIPE, text=True) as worker:
+        assert worker.stdout.readline().strip() == "locked"
+        assert mini_app.invoice(BUYER, "year", False, mock_invoice)["payload"] == signed_invoice["payload"]
+        assert worker.wait(timeout=5) == 0
+    assert storage.get_user(BUYER)["settings"] == {"coins": 42}

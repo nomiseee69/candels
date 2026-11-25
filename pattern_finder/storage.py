@@ -20,7 +20,7 @@ import threading
 import time
 from contextlib import closing, contextmanager
 
-FILE = "users.json"          # имя старого файла; база лежит рядом: users.db
+FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.json")          # имя старого файла; база лежит рядом: users.db
 LOCK = threading.RLock()     # RLock: функция под замком может вызвать другую такую же
 BACKUP_DIR = "backups"
 BACKUP_KEEP = 7              # сколько последних ежедневных копий базы хранить

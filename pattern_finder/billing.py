@@ -41,6 +41,7 @@ import requests
 
 import mini_orders
 import storage
+import subscription_guard as guard
 
 DAY = 86400
 MONTH_SECONDS = 30 * DAY            # Telegram принимает у подписки только период 30 дней
@@ -249,7 +250,12 @@ def valid_stars(payment):
 
 def check_pre_checkout(query):
     """Можно ли принять платёж (Telegram спрашивает перед списанием)."""
-    return mini_orders.checkout(query) if mini_orders.is_order(query) else valid_stars(query)
+    if mini_orders.is_order(query):
+        return mini_orders.checkout(query)
+    if not valid_stars(query):
+        return False
+    with storage.transaction() as db:
+        return guard.reserve(db, query, time.time())
 
 
 def stars_paid(chat_id, payment, now=None):
@@ -264,7 +270,24 @@ def stars_paid(chat_id, payment, now=None):
             return None
         plan = mini_orders.settle(db, chat_id, payment, charge) if native else parse_payload(payment.get("invoice_payload"))[0]
         if plan not in PLANS:
+            if native and payment.get("currency") == "XTR" and type(payment.get("total_amount")) is int:
+                guard.track_conflict(db, chat_id, payment, review=True)
+                storage.add_payment_in(db, charge, chat_id, "stars", "unknown", payment["total_amount"],
+                                       "XTR", status="conflict", data=payment)
+                return "⚠️ Оплата получена. Доступ по этому счёту проверяет поддержка."
             return None
+        if guard.renewal(payment) and guard.renewal_conflicts(db, chat_id, payment.get("invoice_payload"), now):
+            guard.track_conflict(db, chat_id, payment, review=True)
+            storage.add_payment_in(db, charge, chat_id, "stars", plan, payment["total_amount"],
+                                   "XTR", status="conflict", data=payment)
+            return "⚠️ Получено пересекающееся продление. Доступ сохранён, платёж проверяет поддержка."
+        if not guard.renewal(payment) and guard.paid_until(db, chat_id, now):
+            guard.track_conflict(db, chat_id, payment)
+            storage.add_payment_in(db, charge, chat_id, "stars", plan, payment["total_amount"],
+                                   "XTR", status="conflict", data=payment)
+            return "⚠️ Повторная покупка. Доступ сохранён, оплата направлена на возврат."
+        if not guard.renewal(payment):
+            guard.release(db, chat_id)
         storage.add_payment_in(db, charge, chat_id, "stars", plan, payment["total_amount"], "XTR", data=payment)
         expiration = payment.get("subscription_expiration_date")
         until = storage.update_user_in(db, chat_id, lambda user: extend_user(
@@ -278,20 +301,23 @@ def stars_refunded(chat_id, refund):
     """refunded_payment: звёзды вернулись пользователю — Pro снимаем. True — было что снимать."""
     with storage.transaction() as db:
         charge = refund.get("telegram_payment_charge_id")
-        row = db.execute("SELECT at,amount,data FROM payments WHERE id=? AND chat_id=? "
-                         "AND source='stars' AND currency='XTR' AND status='succeeded'", (charge, str(chat_id))).fetchone()
+        row = db.execute("SELECT at,amount,data,status FROM payments WHERE id=? AND chat_id=? "
+                         "AND source='stars' AND currency='XTR' AND status IN ('succeeded','conflict')", (charge, str(chat_id))).fetchone()
         if not row or refund.get("currency", "XTR") != "XTR":
             return False
-        at, amount, data = row
+        at, amount, data, status = row
         if refund.get("total_amount", amount) != amount or (
                 "invoice_payload" in refund and refund["invoice_payload"] != json.loads(data).get("invoice_payload")):
             return False
         db.execute("UPDATE payments SET status='refunded' WHERE id=?", (charge,))
+        if status == "conflict":
+            guard.refund_extra(db, chat_id, charge)
+            return True
         newer = db.execute("SELECT 1 FROM payments WHERE chat_id=? AND status='succeeded' AND at>?",
                            (str(chat_id), at)).fetchone()
         if not newer:
-            storage.update_user_in(db, chat_id, lambda u: _sub(u).update(
-                until=time.time()-1, recurring=False, trial_used=True, forever=False))
+            storage.update_user_in(db, chat_id, lambda u: (None if _sub(u).get("forever") or _sub(u).get("source") != "stars" else _sub(u).update(
+                until=time.time()-1, recurring=False, trial_used=True)))
         return True
 
 
@@ -312,6 +338,9 @@ def yookassa_create(chat_id, plan, http=requests):
     """Платёж в ЮKassa → ссылка на страницу оплаты (или None, если ЮKassa не настроена / ошибка)."""
     if not yookassa_on() or plan not in PLANS:
         return None
+    with storage.transaction() as db:
+        if guard.paid_until(db, chat_id, time.time()):
+            return None
     days, _, rub, title = PLANS[plan]
     body = {"amount": {"value": f"{rub:.2f}", "currency": "RUB"}, "capture": True,
             "confirmation": {"type": "redirect", "return_url": os.getenv("YOOKASSA_RETURN_URL", "https://t.me")},

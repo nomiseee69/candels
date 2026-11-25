@@ -9,6 +9,7 @@ from contextlib import contextmanager
 
 import billing
 import storage
+import subscription_guard as guard
 
 PREFIX = "pro_discount:"
 INVOICE_TTL = billing.DAY
@@ -134,7 +135,7 @@ def invoice(user_id, plan, now=None):
     now = time.time() if now is None else now
     with transaction() as db:
         discount = _active(db, user_id)
-        if not discount:
+        if not discount or guard.paid_until(db, user_id, now):
             return None
         _, base, _, title = billing.PLANS[plan]
         amount = price(base, discount["percent"])
@@ -167,11 +168,13 @@ def pre_checkout(query, now=None):
                 or order["amount"] != price(billing.PLANS[order["plan"]][1], order["percent"])):
             return "stale"
         if order["query_id"] == query["id"]:
-            return "ok" if order["reserved_until"] > now else "stale"
+            return "ok" if order["reserved_until"] > now and guard.reserve(db, query, now) else "stale"
         if _reserved(db, order["discount_id"], now):
             return "busy"
         if order["query_id"]:
             return "stale"
+        if not guard.reserve(db, query, now):
+            return "busy"
         db.execute("UPDATE pro_discount_orders SET query_id = ?, reserved_until = ? WHERE token = ?",
                    (query["id"], now + CHECKOUT_TTL, order["token"]))
         return "ok"
@@ -189,12 +192,14 @@ def settle(user_id, payment, now=None):
             return "duplicate", None
         order = _order(db, payment)
         if (not _matches(order, user_id, payment) or not order["query_id"]
+                or guard.paid_until(db, user_id, now)
                 or order["status"] != "active" or order["plan"] not in billing.PLANS
                 or payment.get("is_recurring") or payment.get("subscription_expiration_date")):
             db.execute("INSERT INTO pro_discount_refunds (charge, user_id) VALUES (?, ?)", (charge, user_id))
             return "refund", None
 
         plan = order["plan"]
+        guard.release(db, user_id)
         storage.add_payment_in(db, charge, user_id, "stars", plan, order["amount"], "XTR", data=payment)
         until = storage.update_user_in(db, user_id, lambda user: billing.extend_user(
             user, billing.PLANS[plan][0], "stars", None, (user.get("sub") or {}).get("recurring", False), now))

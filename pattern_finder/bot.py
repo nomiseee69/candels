@@ -49,6 +49,7 @@ from vision import UnreliableScreenshot, extract_candles, extract_marks, extract
 import billing
 import discounts
 import mini_orders
+import subscription_guard
 import storage
 import brain
 import language
@@ -305,6 +306,12 @@ def profile_view(chat_id):
 
 
 def subscription_view(chat_id):
+    with storage.transaction() as db:
+        if subscription_guard.paid_until(db, chat_id, time.time()):
+            return (f"💎 Подписка · {plan_line(chat_id)}\n"
+                    "Управление продлением доступно в настройках Telegram. "
+                    "Новый тариф можно выбрать после окончания оплаченного доступа.",
+                    {"inline_keyboard": [[{"text": "⬅️ Назад", "callback_data": "profile"}]]})
     month, year = billing.PLANS["month"], billing.PLANS["year"]
     lines = [f"💎 Подписка · {plan_line(chat_id)}\n",
              "Pro — все паттерны, без лимита сканов, автоскан и ответы на любые вопросы.",
@@ -400,6 +407,8 @@ def handle_payment(message):
         text = f"💎 Спасибо! Pro активен до {billing.until_text(until)}. Скидка использована."
     else:
         text = billing.stars_paid(chat_id, payment)
+        if text and text.startswith("⚠️"):
+            alert_admins(f"{text} Пользователь {chat_id}. См. журнал подписок.", 0)
     if text:
         send_message(text, chat_id, {"inline_keyboard": [[TO_MENU]]})
         alert_admins(f"💰 Оплата звёздами: {user_title(chat_id)}, {message['successful_payment'].get('total_amount')} ⭐", 0)
@@ -423,8 +432,8 @@ def handle_pre_checkout(query):
         result = discounts.pre_checkout(query)
     else:
         result = "ok" if billing.check_pre_checkout(query) else "stale"
-    error = {"busy": "Уже открыта другая оплата со скидкой. Подожди несколько минут и открой новый счёт.",
-             "stale": "Этот счёт недоступен — открой «💎 Подписка» ещё раз."}
+    error = {"busy": "Уже открыт другой счёт или доступ Pro оплачен. Проверь подписку в профиле.",
+             "stale": "Счёт недоступен. Проверь срок Pro или открой новый счёт в разделе «Подписка»."}
     answer_pre_checkout(query["id"], result == "ok", error.get(result))
 
 
@@ -2752,7 +2761,7 @@ def handle_callback(query):
         return
 
     if data == "sub":
-        if mini_orders.app_url() and private_sender({"chat": message["chat"], "from": query.get("from")}) == chat_id:
+        if mini_orders.profile_enabled() and private_sender({"chat": message["chat"], "from": query.get("from")}) == chat_id:
             keyboard = {"inline_keyboard": [[{"text": "💎 Открыть Mini App",
                                              "web_app": {"url": mini_orders.app_url()}}],
                                            [{"text": "⬅️ Назад", "callback_data": "profile"}]]}
@@ -3035,6 +3044,7 @@ class Chores:
     @staticmethod
     def discount_refunds():
         discounts.retry_refunds(api_post)
+        subscription_guard.process_conflicts(api_post)
 
     @staticmethod
     def reminders():

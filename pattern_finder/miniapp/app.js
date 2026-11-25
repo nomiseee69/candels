@@ -32,6 +32,17 @@ function render(data) {
   const date = data.until ? new Date(data.until * 1000).toLocaleDateString("ru-RU") : "";
   element("status").textContent = data.pro ?
     (data.trial ? "Пробный Pro" : "Pro") + (date ? " до " + date : "") : "Free";
+  element("affiliate-guide").hidden = !data.affiliate_active;
+  element("affiliate-terms").textContent = data.affiliate_active
+    ? "Приглашай друзей и получай 10% в Telegram Stars от их подходящих покупок в течение одного месяца."
+    : "Партнёрская программа пока не открыта.";
+  element("access").hidden = data.scans_left == null && !data.purchase_blocked;
+  element("access-text").textContent = data.purchase_blocked
+    ? (data.cancelled ? "Автопродление отключено через Finder Candles. " :
+       data.recurring ? "Последний платёж — с автопродлением. Статус можно проверить в Telegram. " : "")
+      + "Новый тариф можно выбрать после окончания оплаченного доступа."
+    : `Бесплатных поисков сегодня: ${data.scans_left}`;
+  element("cancel-renewal").hidden = !data.can_cancel;
   const discount = element("discount");
   discount.hidden = !data.discount;
   discount.textContent = data.discount ? `Персональная скидка ${data.discount}% на одну оплату` : "";
@@ -53,6 +64,9 @@ function render(data) {
     buy.setAttribute("aria-label", `Купить Pro ${title.textContent.toLowerCase()} за ${plan.amount} Stars`);
     buy.addEventListener("click", () => purchase(plan.key, Boolean(data.discount)));
     card.append(info, buy);
+    if (data.purchase_blocked) {
+      buy.replaceWith(document.createTextNode(`⭐ ${plan.amount}`));
+    }
     list.append(card);
   }
 }
@@ -88,6 +102,20 @@ async function purchase(plan, discounted) {
     document.querySelectorAll(".plan button").forEach(button => { button.disabled = false; });
   }
 }
+
+element("cancel-renewal").addEventListener("click", async event => {
+  if (!window.confirm("Отключить будущие списания? Оплаченный доступ сохранится.")) return;
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    render(await api("cancel"));
+    message("Автопродление отключено.");
+  } catch (error) {
+    message(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
 
 if (telegram?.initData) {
   api("state").then(render).catch(error => {

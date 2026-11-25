@@ -5,6 +5,7 @@ import time
 from urllib.parse import urlsplit
 
 import storage
+import subscription_guard as guard
 
 PREFIX = "ma_pro:"
 TTL = 900
@@ -12,8 +13,15 @@ TTL = 900
 
 def app_url():
     url = os.getenv("MINI_APP_URL", "")
-    parsed = urlsplit(url)
-    return url if parsed.scheme == "https" and parsed.hostname and not parsed.username else ""
+    try:
+        parsed = urlsplit(url)
+        return url if parsed.scheme == "https" and parsed.hostname and not parsed.username else ""
+    except ValueError:
+        return ""
+
+
+def profile_enabled():
+    return bool(app_url()) and os.getenv("MINI_APP_PROFILE_ENABLED", "0") == "1"
 
 
 def is_order(event):
@@ -32,6 +40,12 @@ def create(buyer, plan, amount, now=None):
     payload = PREFIX + secrets.token_urlsafe(24)
     with storage.transaction() as db:
         schema(db)
+        if guard.paid_until(db, buyer, now):
+            raise ValueError(guard.BLOCKED)
+        existing = db.execute("SELECT payload FROM mini_orders WHERE buyer=? AND plan=? AND amount=? "
+                              "AND expires>? AND checkout IS NULL", (buyer, plan, amount, now)).fetchone()
+        if existing:
+            return existing[0]
         count = db.execute("SELECT COUNT(*) FROM mini_orders WHERE buyer=? AND expires>?",
                            (buyer, now)).fetchone()[0]
         if count >= 6:
@@ -53,6 +67,8 @@ def checkout(event, now=None):
     with storage.transaction() as db:
         found = order(db, (event.get("from") or {}).get("id"), event)
         if not found or found[1] <= now or found[3] or (found[2] and found[2] != event["id"]):
+            return False
+        if not guard.reserve(db, event, now):
             return False
         db.execute("UPDATE mini_orders SET checkout=? WHERE payload=?", (event["id"], event["invoice_payload"]))
         return True

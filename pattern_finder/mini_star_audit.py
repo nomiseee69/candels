@@ -4,6 +4,7 @@ import json
 
 import notifier
 import storage
+import subscription_guard
 
 
 def reconcile(transactions):
@@ -48,7 +49,15 @@ def summary():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Сверка подтверждённых платежей и возвратов Stars")
     parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--charge", help="Показать конкретный Telegram charge ID")
+    parser.add_argument("--conflicts", action="store_true", help="Показать платежи для ручной сверки")
     args = parser.parse_args()
+    if args.conflicts:
+        with storage.transaction() as db:
+            subscription_guard.schema(db)
+            for row in db.execute("SELECT charge,buyer,recurring,state FROM pro_conflicts WHERE state!='refunded'"):
+                print(*row)
+        raise SystemExit(0)
     if args.offset < 0 or not notifier.TOKEN:
         raise SystemExit("Некорректный offset или отсутствует TELEGRAM_TOKEN")
     try:
@@ -58,6 +67,17 @@ if __name__ == "__main__":
     if not reply.get("ok"):
         raise SystemExit("Telegram отклонил запрос журнала")
     print("Новых записей:", reconcile(reply["result"]["transactions"]))
+    if args.charge:
+        with storage.transaction() as db:
+            rows = db.execute("SELECT a.event,p.amount,a.ledger_nanos,a.commission_nanos,p.status "
+                              "FROM mini_star_audit a JOIN payments p ON p.id=a.charge WHERE a.charge=?",
+                              (args.charge,)).fetchall()
+        for event, gross, ledger, fee, status in rows:
+            print(event, "покупка:", gross, "движение Telegram:", ledger / 10**9,
+                  "комиссия:", fee / 10**9 if fee is not None else "неизвестно", "статус:", status)
+        if not rows:
+            print("Операция пока не сверена. Проверь offset и наличие локальной оплаты.")
+        raise SystemExit(0)
     for event, count, gross, delta, known, fee in summary():
         print(event, "записей:", count, "сумма исходных оплат:", gross,
               "движение по журналу:", delta / 10**9, "комиссия подтверждена для:", known,

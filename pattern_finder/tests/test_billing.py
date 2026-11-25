@@ -91,7 +91,8 @@ def test_stars_subscription(tmp_path):
         month = next(d for d in asked if d["payload"] == "pro_month_500")
         assert month["currency"] == "XTR" and month["subscription_period"] == 30 * DAY
         assert "subscription_period" not in next(d for d in asked if d["payload"] == "pro_year_4800")
-        assert billing.check_pre_checkout({"invoice_payload": "pro_month_500", "currency": "XTR", "total_amount": 500})
+        assert billing.check_pre_checkout({"id": "q7", "from": {"id": 7}, "invoice_payload": "pro_month_500",
+                                           "currency": "XTR", "total_amount": 500})
         assert not billing.check_pre_checkout({"invoice_payload": "pro_month_500", "currency": "USD", "total_amount": 500})
         now = time.time()
         storage.update_user(7, lambda u: u.update(sub={"trial_used": True}))
@@ -102,8 +103,8 @@ def test_stars_subscription(tmp_path):
         st = billing.status(7, now)
         assert st["pro"] and st["recurring"] and abs(st["until"] - (now + 30 * DAY)) < 2
         year = {"invoice_payload": "pro_year", "total_amount": 4800, "currency": "XTR", "telegram_payment_charge_id": "c2"}
-        billing.stars_paid(7, year, now)
-        assert billing.status(7, now)["until"] > now + 390 * DAY            # год добавился к месяцу
+        assert "возврат" in billing.stars_paid(7, year, now)
+        assert billing.status(7, now)["until"] == st["until"]
     finally:
         storage.FILE = original
         billing._links.clear()

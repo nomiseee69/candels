@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 import time
 from socketserver import ThreadingMixIn
@@ -14,6 +15,7 @@ import discounts
 import mini_orders
 import notifier
 import storage
+import subscription_guard as guard
 
 ROOT = Path(__file__).with_name("miniapp")
 AUTH_TTL = 900
@@ -45,18 +47,43 @@ def state(buyer, payload=None):
     percent = offer["percent"] if offer else None
     plans = [{"key": key, "days": days, "base": stars, "amount": discounts.price(stars, percent) if offer else stars,
               "recurring": key == "month" and not offer} for key, (days, stars, _, _) in billing.PLANS.items()]
-    paid = False
-    if payload:
-        with storage.transaction() as db:
-            paid = db.execute("SELECT 1 FROM payments WHERE chat_id=? AND status='succeeded' AND source='stars' "
-                              "AND json_extract(data,'$.invoice_payload')=? LIMIT 1", (str(buyer), payload)).fetchone() is not None
-    return {"pro": status["pro"], "until": status["until"], "recurring": bool(status.get("recurring") and status["pro"]),
+    with storage.transaction() as db:
+        guard.schema(db)
+        blocked = bool(guard.paid_until(db, buyer, time.time()))
+        charge = guard.recurring_charge(db, buyer) if blocked and status.get("recurring") else None
+        cancelled = bool(charge and db.execute("SELECT 1 FROM pro_renewal_cancelled WHERE charge=?", (charge,)).fetchone())
+        paid = bool(payload and db.execute("SELECT 1 FROM payments WHERE chat_id=? AND status='succeeded' AND source='stars' "
+                    "AND json_extract(data,'$.invoice_payload')=? LIMIT 1", (str(buyer), payload)).fetchone())
+    return {"pro": status["pro"], "until": status["until"], "recurring": bool(status.get("recurring") and blocked),
+            "cancelled": cancelled, "can_cancel": bool(charge and not cancelled), "purchase_blocked": blocked,
+            "scans_left": None if status["pro"] else billing.scans_left(buyer),
+            "affiliate_active": os.getenv("MINI_APP_AFFILIATE_ACTIVE", "0") == "1",
             "trial": bool(status["trial"] and status["pro"]), "discount": percent, "plans": plans, "paid": paid}
+
+
+def cancel_renewal(buyer, api=None):
+    status = billing.status(buyer, provision=False)
+    with storage.transaction() as db:
+        guard.schema(db)
+        charge = guard.recurring_charge(db, buyer) if status["pro"] and status.get("recurring") else None
+        if not charge:
+            raise ValueError("Управляй продлением в настройках Telegram.")
+        if db.execute("SELECT 1 FROM pro_renewal_cancelled WHERE charge=?", (charge,)).fetchone():
+            return
+    response = (api or notifier.api_post)("editUserStarSubscription", {
+        "user_id": buyer, "telegram_payment_charge_id": charge, "is_canceled": True})
+    if not response.get("ok"):
+        raise ValueError("Управляй продлением в настройках Telegram.")
+    with storage.transaction() as db:
+        db.execute("INSERT OR IGNORE INTO pro_renewal_cancelled VALUES (?)", (charge,))
 
 
 def invoice(buyer, plan, discounted, api=None):
     if not isinstance(plan, str) or plan not in billing.PLANS or type(discounted) is not bool:
         raise ValueError("Неизвестный тариф.")
+    with storage.transaction() as db:
+        if guard.paid_until(db, buyer, time.time()):
+            raise ValueError(guard.BLOCKED)
     days, amount, _, _ = billing.PLANS[plan]
     title = f"Finder Candles Pro · {days} дней"
     if discounted:
@@ -100,7 +127,9 @@ def application(env, start):
     if method == "GET" and path in TYPES:
         filename, mime = TYPES[path]
         return response("200 OK", (ROOT / filename).read_bytes(), mime)
-    if method != "POST" or path not in ("/api/state", "/api/invoice"):
+    if method == "GET" and path == "/health":
+        return response("200 OK", {"ok": True})
+    if method != "POST" or path not in ("/api/state", "/api/invoice", "/api/cancel"):
         return response("404 Not Found", {"error": "Страница недоступна."})
     raw = env.get("HTTP_X_TELEGRAM_INIT_DATA", "")
     try:
@@ -117,10 +146,14 @@ def application(env, start):
         if path == "/api/state":
             payload = data.get("payload")
             return response("200 OK", state(buyer, payload if isinstance(payload, str) else None))
+        if path == "/api/cancel":
+            cancel_renewal(buyer)
+            return response("200 OK", state(buyer))
         return response("200 OK", invoice(buyer, data.get("plan"), data.get("discounted")))
     except ValueError as error:
         # JSON parsing errors can contain input details, so expose only our own text.
         message = str(error) if str(error) in (
+            guard.BLOCKED, "Управляй продлением в настройках Telegram.",
             "Некорректный запрос.", "Неизвестный тариф.", "Скидка изменилась. Обнови экран.",
             "Доступна персональная скидка. Обнови экран.", "Слишком много открытых счетов. Повтори позже.") else "Некорректный запрос."
         return response("400 Bad Request", {"error": message})
