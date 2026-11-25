@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Finder Candles</title>
+<link rel="stylesheet" href="/app.css">
+<script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+<script src="/app.js" defer></script>
+</head>
+<body>
+<main>
+<header><span class="mark" aria-hidden="true">↗</span><strong>Finder Candles</strong><button type="button" id="close">В чат</button></header>
+<nav aria-label="Разделы"><button type="button" data-panel="pro" aria-pressed="true">Подписка</button><button type="button" data-panel="partners" aria-pressed="false">Партнёрам</button></nav>
+<section id="pro">
+<div class="hero"><div class="chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+<p class="eyebrow">FINDER CANDLES PRO</p><h1>Поиск без лимитов</h1>
+<p>17 типов паттернов, поиск по фото, автоскан и разметка TradingView.</p></div>
+<div class="status"><span>Твой тариф</span><strong id="status">Загрузка…</strong></div>
+<p class="discount" id="discount" hidden></p>
+<div id="plans" class="plans"></div>
+<p id="message" role="status" aria-live="polite"></p>
+</section>
+<section id="partners" hidden>
+<div class="hero"><p class="eyebrow">TELEGRAM STARS</p><h1>Партнёрская программа</h1>
+<p>При комиссии 10% ты получаешь долю от подходящих покупок Pro в течение срока, установленного в Telegram.</p></div>
+<div class="instructions"><h2>Как получить ссылку</h2><ol>
+<li>В Telegram открой «Настройки» → «Мои звёзды» → «Заработать звёзды».</li>
+<li>Выбери Finder Candles, если программа доступна, и выбери баланс для комиссии.</li>
+<li>Скопируй официальную ссылку. Там же можно посмотреть статистику.</li>
+</ol><p>Stars зачисляет Telegram на выбранный баланс. Ставку и срок проверь перед подключением.</p>
+<button type="button" id="guide">Инструкция Telegram ↗</button></div>
+</section>
+</main>
+</body>
+</html>

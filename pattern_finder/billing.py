@@ -39,6 +39,7 @@ import uuid
 
 import requests
 
+import mini_orders
 import storage
 
 DAY = 86400
@@ -76,7 +77,7 @@ def _sub(user):
     return user.setdefault("sub", {})
 
 
-def status(chat_id, now=None):
+def status(chat_id, now=None, *, provision=True):
     """{"pro", "until", "source", "trial", "admin"}. Пользователь без пробного — получает его
     при первом обращении (и новички, и те, кто пользовался ботом до подписки)."""
     now = now or time.time()
@@ -95,7 +96,8 @@ def status(chat_id, now=None):
                 sub.update(trial_used=True, until=max(sub.get("until") or 0, now + TRIAL_DAYS * DAY),
                            source="trial", trial_started=now)
             return dict(sub)
-        sub = storage.update_user(chat_id, give_trial)
+        if provision:
+            sub = storage.update_user(chat_id, give_trial)
     elif sub.get("source") == "trial" and sub.get("until"):
         # пробный не длиннее TRIAL_DAYS (в обн. 40 он был 7 дней — укорачиваем выданные тогда)
         started = sub.get("trial_started") or sub["until"] - 7 * DAY
@@ -105,7 +107,7 @@ def status(chat_id, now=None):
             def shorten(user):
                 _sub(user).update(until=limit, trial_started=started)
                 return dict(_sub(user))
-            sub = storage.update_user(chat_id, shorten)
+            sub = storage.update_user(chat_id, shorten) if provision else {**sub, "until": limit}
     until = sub.get("until") or 0
     return {"pro": until > now, "until": until or None, "source": sub.get("source"),
             "trial": sub.get("source") == "trial", "admin": False, "recurring": sub.get("recurring", False)}
@@ -247,25 +249,26 @@ def valid_stars(payment):
 
 def check_pre_checkout(query):
     """Можно ли принять платёж (Telegram спрашивает перед списанием)."""
-    return valid_stars(query)
+    return mini_orders.checkout(query) if mini_orders.is_order(query) else valid_stars(query)
 
 
 def stars_paid(chat_id, payment, now=None):
     """successful_payment → продлить подписку. Возвращает текст для пользователя (или None — повтор)."""
     now = now or time.time()
-    plan, _ = parse_payload(payment.get("invoice_payload"))
-    if not valid_stars(payment):
-        print(f"⚠️ Подозрительный платёж от {chat_id}: {payment}")
+    native = mini_orders.is_order(payment)
+    charge = payment.get("telegram_payment_charge_id")
+    if not charge or (not native and not valid_stars(payment)):
         return None
-    charge = payment.get("telegram_payment_charge_id") or str(uuid.uuid4())
-    if not storage.add_payment(charge, chat_id, "stars", plan, payment.get("total_amount", 0), "XTR",
-                               data=payment):
-        return None
-    if payment.get("subscription_expiration_date"):              # подписка: Telegram сказал, до какого числа
-        until = extend(chat_id, until=payment["subscription_expiration_date"], source="stars", recurring=True,
-                       now=now)
-    else:
-        until = extend(chat_id, PLANS[plan][0], source="stars", now=now)
+    with storage.transaction() as db:
+        if db.execute("SELECT 1 FROM payments WHERE id=?", (charge,)).fetchone():
+            return None
+        plan = mini_orders.settle(db, chat_id, payment, charge) if native else parse_payload(payment.get("invoice_payload"))[0]
+        if plan not in PLANS:
+            return None
+        storage.add_payment_in(db, charge, chat_id, "stars", plan, payment["total_amount"], "XTR", data=payment)
+        expiration = payment.get("subscription_expiration_date")
+        until = storage.update_user_in(db, chat_id, lambda user: extend_user(
+            user, None if expiration else PLANS[plan][0], "stars", expiration, bool(expiration), now))
     renew = " Продление — автоматически каждые 30 дней, отменить можно в настройках Telegram." \
         if payment.get("subscription_expiration_date") else ""
     return f"💎 Спасибо! Pro активен до {until_text(until)}.{renew}"
@@ -273,11 +276,23 @@ def stars_paid(chat_id, payment, now=None):
 
 def stars_refunded(chat_id, refund):
     """refunded_payment: звёзды вернулись пользователю — Pro снимаем. True — было что снимать."""
-    charge = refund.get("telegram_payment_charge_id")
-    if not charge or not storage.set_payment_status(charge, "refunded"):
-        return False
-    revoke(chat_id)
-    return True
+    with storage.transaction() as db:
+        charge = refund.get("telegram_payment_charge_id")
+        row = db.execute("SELECT at,amount,data FROM payments WHERE id=? AND chat_id=? "
+                         "AND source='stars' AND currency='XTR' AND status='succeeded'", (charge, str(chat_id))).fetchone()
+        if not row or refund.get("currency", "XTR") != "XTR":
+            return False
+        at, amount, data = row
+        if refund.get("total_amount", amount) != amount or (
+                "invoice_payload" in refund and refund["invoice_payload"] != json.loads(data).get("invoice_payload")):
+            return False
+        db.execute("UPDATE payments SET status='refunded' WHERE id=?", (charge,))
+        newer = db.execute("SELECT 1 FROM payments WHERE chat_id=? AND status='succeeded' AND at>?",
+                           (str(chat_id), at)).fetchone()
+        if not newer:
+            storage.update_user_in(db, chat_id, lambda u: _sub(u).update(
+                until=time.time()-1, recurring=False, trial_used=True, forever=False))
+        return True
 
 
 # --- ЮKassa -----------------------------------------------------------------------------------------

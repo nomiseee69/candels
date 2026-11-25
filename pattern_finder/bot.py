@@ -48,6 +48,7 @@ from fingerprint import FAMILY, describe as describe_fingerprint, kind_text, mak
 from vision import UnreliableScreenshot, extract_candles, extract_marks, extract_range
 import billing
 import discounts
+import mini_orders
 import storage
 import brain
 import language
@@ -565,8 +566,7 @@ def admin_refund(key):
     answer = api_post("refundStarPayment", {"user_id": int(key), "telegram_payment_charge_id": stars[0]["id"]})
     if not answer.get("ok"):
         return f"Не получилось вернуть: {answer.get('description', 'ошибка Telegram')}"
-    storage.set_payment_status(stars[0]["id"], "refunded")
-    billing.revoke(int(key))
+    billing.stars_refunded(int(key), {"telegram_payment_charge_id": stars[0]["id"]})
     return f"↩️ Вернул {stars[0]['amount']:.0f} ⭐ пользователю {user_title(key)}, Pro снят."
 
 
@@ -2752,7 +2752,13 @@ def handle_callback(query):
         return
 
     if data == "sub":
-        show_view(chat_id, message_id, subscription_view(chat_id), media)
+        if mini_orders.app_url() and private_sender({"chat": message["chat"], "from": query.get("from")}) == chat_id:
+            keyboard = {"inline_keyboard": [[{"text": "💎 Открыть Mini App",
+                                             "web_app": {"url": mini_orders.app_url()}}],
+                                           [{"text": "⬅️ Назад", "callback_data": "profile"}]]}
+            show_view(chat_id, message_id, ("💎 Подписка и партнёрская программа", keyboard), media)
+        else:
+            show_view(chat_id, message_id, subscription_view(chat_id), media)
         return
 
     if data == "profile":
@@ -3110,8 +3116,8 @@ def main():
                     handle_pre_checkout(update["pre_checkout_query"])
             except Exception as error:
                 report_error("Ошибка при обработке", error)
-                payment = update.get("message", {}).get("successful_payment")
-                if isinstance(error, sqlite3.Error) and payment and discounts.is_discount(payment):
+                message = update.get("message", {})
+                if isinstance(error, sqlite3.Error) and ("successful_payment" in message or "refunded_payment" in message):
                     # Не подтверждаем получение платежа, пока не записали его в базу.
                     time.sleep(1)
                     break
