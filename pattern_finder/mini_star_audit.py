@@ -3,6 +3,7 @@ import argparse
 import json
 
 import notifier
+import partner_finance
 import storage
 import subscription_guard
 
@@ -14,9 +15,18 @@ def reconcile(transactions):
             charge TEXT NOT NULL REFERENCES payments(id), event TEXT NOT NULL, at INTEGER NOT NULL,
             ledger_nanos INTEGER NOT NULL, commission_nanos INTEGER, rate INTEGER,
             PRIMARY KEY(charge,event))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS fc_fragment_withdrawals (
+            id TEXT PRIMARY KEY, stars INTEGER NOT NULL, confirmed INTEGER NOT NULL)""")
         for tx in transactions:
             source, receiver = tx.get("source"), tx.get("receiver")
             if bool(source) == bool(receiver):
+                continue
+            withdrawal = (receiver or {}).get("withdrawal_state") or {}
+            if receiver and receiver.get("type") == "fragment" and withdrawal.get("type") == "succeeded":
+                stars = abs(tx["amount"])
+                if stars and not tx.get("nanostar_amount"):
+                    db.execute("INSERT OR IGNORE INTO fc_fragment_withdrawals VALUES (?,?,?)",
+                               (tx["id"], stars, withdrawal["date"]))
                 continue
             peer = source or receiver
             if peer.get("type") != "user" or peer.get("transaction_type") != "invoice_payment":
@@ -36,6 +46,8 @@ def reconcile(transactions):
                                 (charge, event, tx["date"], abs(delta) if source else -abs(delta), commission,
                                  affiliate["commission_per_mille"] if affiliate else None))
             written += cursor.rowcount
+            if event == "refund":
+                partner_finance.reverse(db, charge, tx["date"])
     return written
 
 
@@ -49,6 +61,7 @@ def summary():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Сверка подтверждённых платежей и возвратов Stars")
     parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--fragment", action="store_true", help="Показать подтверждённые выводы Fragment")
     parser.add_argument("--charge", help="Показать конкретный Telegram charge ID")
     parser.add_argument("--conflicts", action="store_true", help="Показать платежи для ручной сверки")
     args = parser.parse_args()
@@ -67,6 +80,11 @@ if __name__ == "__main__":
     if not reply.get("ok"):
         raise SystemExit("Telegram отклонил запрос журнала")
     print("Новых записей:", reconcile(reply["result"]["transactions"]))
+    if args.fragment:
+        with storage.transaction() as db:
+            for row in db.execute("SELECT id,stars,confirmed FROM fc_fragment_withdrawals ORDER BY confirmed DESC LIMIT 30"):
+                print(*row)
+        raise SystemExit(0)
     if args.charge:
         with storage.transaction() as db:
             rows = db.execute("SELECT a.event,p.amount,a.ledger_nanos,a.commission_nanos,p.status "

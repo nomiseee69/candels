@@ -13,6 +13,8 @@ from wsgiref.simple_server import WSGIServer, WSGIRequestHandler, make_server
 import billing
 import discounts
 import mini_orders
+import partner_finance as partners
+import partner_payouts
 import notifier
 import storage
 import subscription_guard as guard
@@ -41,54 +43,44 @@ def authenticate(raw, token, now=None):
     return user["id"]
 
 
-AFFILIATE_URL = "tg://settings/stars/earn"
-AFFILIATE_COOLDOWN = 60
-AFFILIATE_MESSAGE = (
-    "🤝 Партнёрская программа Finder Candles\n\n"
-    "Приглашай пользователей и получай 10% от подходящих покупок в течение одного месяца.\n\n"
-    "1. Нажми кнопку ниже.\n"
-    "2. Выбери «Дата запуска» и найди Finder Candles (@findercandles_bot).\n"
-    "3. Проверь условия и нажми «Присоединиться».\n"
-    "4. Выбери баланс для получения Stars.\n"
-    "5. Скопируй свою партнёрскую ссылку.\n\n"
-    "Персональную ссылку создаст Telegram после подключения."
-)
+PARTNER_ROUTES = {"state", "register", "challenge", "verify", "disconnect", "request"}
+TON_SDK = "https://unpkg.com/@tonconnect/ui@3.1.0/dist/tonconnect-ui.min.js"
 
 
-def affiliate_enabled():
-    return os.getenv("MINI_APP_AFFILIATE_ACTIVE", "0") == "1"
+def manifest_config():
+    domain = os.getenv("TON_CONNECT_APP_DOMAIN", "findercandles.duckdns.org")
+    if not domain or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-." for c in domain) or "." not in domain:
+        raise partners.Error("Домен TON Connect не настроен.")
+    url = "https://" + domain
+    manifest = url + "/tonconnect-manifest.json"
+    if os.getenv("TON_CONNECT_MANIFEST_URL", manifest) != manifest:
+        raise partners.Error("Адрес манифеста TON Connect не соответствует домену.")
+    return domain, manifest, {"url": url, "name": "Finder Candles Partners", "iconUrl": url + "/tonconnect-icon.png"}
 
 
-def send_affiliate_message(buyer):
-    if not affiliate_enabled():
-        return "403 Forbidden", {"error": "Партнёрская программа пока недоступна."}
-    # Claim a short cooldown before calling Telegram, including when delivery times out.
-    # Release the database lock before making the network request.
-    now = int(time.time())
-    with storage.transaction() as db:
-        db.execute("CREATE TABLE IF NOT EXISTS mini_affiliate_messages "
-                   "(buyer INTEGER PRIMARY KEY, next_attempt INTEGER NOT NULL)")
-        db.execute("CREATE INDEX IF NOT EXISTS mini_affiliate_messages_expiry "
-                   "ON mini_affiliate_messages(next_attempt)")
-        db.execute("DELETE FROM mini_affiliate_messages WHERE next_attempt<=?", (now,))
-        claimed = db.execute("INSERT OR IGNORE INTO mini_affiliate_messages VALUES (?,?)",
-                             (buyer, now + AFFILIATE_COOLDOWN))
-        if not claimed.rowcount:
-            until, = db.execute("SELECT next_attempt FROM mini_affiliate_messages WHERE buyer=?", (buyer,)).fetchone()
-            return "429 Too Many Requests", {
-                "error": "Проверь чат с ботом. Повторить отправку можно чуть позже.", "retry_after": until - now}
-
-    keyboard = {"inline_keyboard": [[{"text": "🚀 Открыть партнёрскую программу", "url": AFFILIATE_URL}]]}
-    reply = notifier.api_post("sendMessage", {
-        "chat_id": buyer, "text": AFFILIATE_MESSAGE, "reply_markup": json.dumps(keyboard, ensure_ascii=False)})
-    result = reply.get("result")
-    if reply.get("ok") is True and isinstance(result, dict) and type(result.get("message_id")) is int and result["message_id"] > 0:
-        return "200 OK", {"sent": True}
-    if reply.get("error_code") in (400, 403):
-        return "403 Forbidden", {"error": "Бот не может написать тебе. Открой чат, разблокируй бота при необходимости, "
-                                           "нажми «Старт» и повтори попытку."}
-    return "503 Service Unavailable", {"error": "Telegram пока не подтвердил отправку. Проверь чат с ботом "
-                                               "или повтори попытку через минуту."}
+def partner_action(buyer, action, data):
+    if action == "state":
+        result = partner_payouts.overview(buyer)
+        if result["registered"]:
+            _, result["manifest"], _ = manifest_config()
+            result["sdk"] = TON_SDK
+        return result
+    if action == "register":
+        return {"link": partners.link(buyer)}
+    if action == "disconnect":
+        partner_payouts.disconnect(buyer)
+        return {}
+    if not partners.enabled():
+        raise partners.Error("Партнёрская программа пока недоступна.")
+    if action == "challenge":
+        manifest_config()
+        return {"payload": partner_payouts.challenge(buyer)}
+    if action == "verify":
+        domain, _, _ = manifest_config()
+        partner_payouts.bind(buyer, data.get("account"), data.get("proof"), domain)
+        return {}
+    key = partner_payouts.request(buyer, partners.amount(data.get("amount")), billing.admins())
+    return {"request": key}
 
 
 def state(buyer, payload=None):
@@ -107,7 +99,6 @@ def state(buyer, payload=None):
     return {"pro": status["pro"], "until": status["until"], "recurring": bool(status.get("recurring") and blocked),
             "cancelled": cancelled, "can_cancel": bool(charge and not cancelled), "purchase_blocked": blocked,
             "scans_left": None if status["pro"] else billing.scans_left(buyer),
-            "affiliate_active": affiliate_enabled(),
             "trial": bool(status["trial"] and status["pro"]), "discount": percent, "plans": plans, "paid": paid}
 
 
@@ -160,17 +151,19 @@ def invoice(buyer, plan, discounted, api=None):
 
 
 TYPES = {"/": ("index.html", "text/html"), "/app.css": ("app.css", "text/css"),
-         "/app.js": ("app.js", "text/javascript")}
+         "/app.js": ("app.js", "text/javascript"),
+         "/tonconnect-icon.png": ("tonconnect-icon.png", "image/png")}
 HEADERS = [("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"),
            ("Referrer-Policy", "no-referrer"),
-           ("Content-Security-Policy", "default-src 'none'; script-src 'self' https://telegram.org; "
-            "style-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'")]
+           ("Content-Security-Policy", "default-src 'none'; script-src 'self' https://telegram.org https://unpkg.com; "
+            "style-src 'self' 'unsafe-inline'; connect-src 'self' https:; img-src 'self' https: data:; base-uri 'none'; form-action 'none'")]
 
 
 def application(env, start):
-    def response(status, body, mime="application/json"):
+    def response(status, body, mime="application/json", extra=()):
         data = json.dumps(body, ensure_ascii=False).encode() if isinstance(body, dict) else body
-        start(status, HEADERS + [("Content-Type", mime + "; charset=utf-8"), ("Content-Length", str(len(data)))])
+        start(status, HEADERS + list(extra) + [("Content-Type", mime + ("; charset=utf-8" if not mime.startswith("image/") else "")),
+                                                  ("Content-Length", str(len(data)))])
         return [data]
 
     path, method = env["PATH_INFO"], env["REQUEST_METHOD"]
@@ -179,7 +172,14 @@ def application(env, start):
         return response("200 OK", (ROOT / filename).read_bytes(), mime)
     if method == "GET" and path == "/health":
         return response("200 OK", {"ok": True})
-    if method != "POST" or path not in ("/api/state", "/api/invoice", "/api/cancel", "/api/affiliate-message"):
+    if method == "GET" and path == "/tonconnect-manifest.json":
+        try:
+            _, _, manifest = manifest_config()
+        except partners.Error:
+            return response("503 Service Unavailable", {"error": "TON Connect недоступен."})
+        return response("200 OK", manifest, extra=(("Access-Control-Allow-Origin", "*"),))
+    affiliate = path.removeprefix("/api/partners/") if path.startswith("/api/partners/") else None
+    if method != "POST" or (path not in ("/api/state", "/api/invoice", "/api/cancel") and affiliate not in PARTNER_ROUTES):
         return response("404 Not Found", {"error": "Страница недоступна."})
     raw = env.get("HTTP_X_TELEGRAM_INIT_DATA", "")
     try:
@@ -188,13 +188,13 @@ def application(env, start):
         return response("401 Unauthorized", {"error": "Открой приложение заново из Telegram."})
     try:
         length = int(env.get("CONTENT_LENGTH") or "0")
-        if not 0 < length <= 2048:
+        if not 0 < length <= (24000 if affiliate == "verify" else 2048):
             raise ValueError("Некорректный запрос.")
         data = json.loads(env["wsgi.input"].read(length))
         if not isinstance(data, dict):
             raise ValueError("Некорректный запрос.")
-        if path == "/api/affiliate-message":
-            return response(*send_affiliate_message(buyer))
+        if affiliate in PARTNER_ROUTES:
+            return response("200 OK", partner_action(buyer, affiliate, data))
         if path == "/api/state":
             payload = data.get("payload")
             return response("200 OK", state(buyer, payload if isinstance(payload, str) else None))
@@ -202,6 +202,8 @@ def application(env, start):
             cancel_renewal(buyer)
             return response("200 OK", state(buyer))
         return response("200 OK", invoice(buyer, data.get("plan"), data.get("discounted")))
+    except partners.Error as error:
+        return response("400 Bad Request", {"error": str(error)})
     except ValueError as error:
         # JSON parsing errors can contain input details, so expose only our own text.
         message = str(error) if str(error) in (

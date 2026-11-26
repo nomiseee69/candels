@@ -8,6 +8,7 @@ import time
 from contextlib import contextmanager
 
 import billing
+import partner_finance
 import storage
 import subscription_guard as guard
 
@@ -201,6 +202,7 @@ def settle(user_id, payment, now=None):
         plan = order["plan"]
         guard.release(db, user_id)
         storage.add_payment_in(db, charge, user_id, "stars", plan, order["amount"], "XTR", data=payment)
+        partner_finance.record_purchase(db, user_id, charge, plan, payment, now, order["percent"])
         until = storage.update_user_in(db, user_id, lambda user: billing.extend_user(
             user, billing.PLANS[plan][0], "stars", None, (user.get("sub") or {}).get("recurring", False), now))
         db.execute("UPDATE pro_discount_orders SET charge = ?, reserved_until = NULL WHERE token = ?",

@@ -23,43 +23,43 @@
 <p id="message" role="status" aria-live="polite"></p>
 </section>
 <section id="partners" hidden>
-<div class="hero"><p class="eyebrow">TELEGRAM STARS</p><h1>🤝 Партнёрская программа</h1>
-<p id="affiliate-terms">Партнёрская программа пока не открыта.</p></div>
-<div id="affiliate-guide" class="affiliate-flow" hidden>
-<button class="affiliate-action" id="affiliate-open" type="button" aria-describedby="affiliate-note">🚀 Стать партнёром</button>
-<p class="affiliate-navigation" id="affiliate-note">Подключение и получение ссылки происходят через Telegram.</p>
-<p class="affiliate-navigation" id="affiliate-navigation" role="status" hidden></p>
-<details class="instructions" id="affiliate-steps">
-<summary>Как найти Finder Candles?</summary>
-<div class="affiliate-identity">
-<strong>Finder Candles</strong>
-<input id="affiliate-username" aria-label="Имя бота в Telegram" value="@findercandles_bot" readonly>
-<button type="button" id="affiliate-copy">📋 Скопировать @findercandles_bot</button>
-<p id="affiliate-copy-status" role="status"></p>
-</div>
-<ol>
-<li>Открой настройки Telegram.</li>
-<li>Перейди в «Мои звёзды».</li>
-<li>Выбери «Заработать звёзды».</li>
-<li>В меню сортировки выбери <strong>«Дата запуска»</strong>. Если клиент предлагает порядок, выбери <strong>«Сначала новые»</strong>. Если отдельного переключателя нет, начни с самых новых программ в списке.</li>
-<li>Если есть поиск, введи <strong>Finder Candles</strong> или @findercandles_bot. Если поиска нет, просматривай список по дате запуска.</li>
-<li>Найди <strong>Finder Candles</strong> (@findercandles_bot) с комиссией <strong>10%</strong> на <strong>1 месяц</strong>. Если виден аватар, сравни его с аватаром бота.</li>
-<li>Открой карточку и проверь название и условия.</li>
-<li>Нажми «Присоединиться».</li>
-<li>Выбери баланс. Личный подходит для покупок и подписок в Telegram. Если доступен баланс своего канала или бота, выбери его для задач этого канала или бота. Между этими балансами Stars свободно не переводятся, поэтому выбери баланс до создания ссылки.</li>
-<li>Telegram выдаст персональную ссылку. Она доступна по пути «Настройки» → «Мои звёзды» → «Заработать звёзды» → «Мои программы» → <strong>Finder Candles</strong>.</li>
-</ol>
-</details>
+<div class="hero"><p class="eyebrow">FINDER CANDLES PARTNERS</p><h1>🤝 Партнёрская программа</h1>
+<p id="partner-terms">Загрузка…</p></div>
+<div class="instructions" id="partner-start" hidden><button class="affiliate-action" id="partner-register" type="button">Получить ссылку</button></div>
+<div id="partner-panel" hidden>
 <div class="instructions">
-<h2>Получил партнёрскую ссылку?</h2>
-<p>Отправляй друзьям и публикуй персональную ссылку, которую создал Telegram. Обычная ссылка на бота не засчитывает приглашение. Статистика и доход доступны в Telegram в разделе «Мои программы».</p>
-<details>
-<summary>Как поделиться ссылкой</summary>
-<p>Скопируй свою ссылку из «Моих программ» и добавь её в конец сообщения.</p>
-<blockquote>Нашёл Finder Candles — бот автоматически ищет похожие криптовалютные паттерны по скриншотам графиков. Попробуй!</blockquote>
-</details>
+<h2>Твоя ссылка</h2>
+<div class="affiliate-identity">
+<input id="partner-link" aria-label="Реферальная ссылка" readonly>
+<button type="button" id="partner-copy">📋 Скопировать ссылку</button>
 </div>
+<p id="partner-counts"></p>
 </div>
+<div class="instructions">
+<h2>Баланс</h2>
+<p id="partner-balances"></p>
+<p id="partner-held"></p>
+</div>
+<div class="instructions">
+<h2>Выплаты на TON</h2>
+<p id="partner-wallet"></p>
+<button type="button" id="partner-connect">💎 Подключить TON-кошелёк</button>
+<button type="button" id="partner-disconnect" hidden>Отключить</button>
+<p id="partner-threshold"></p>
+<form id="partner-form" hidden>
+<label>Сумма в USDT <input name="amount" inputmode="decimal" required maxlength="16"></label>
+<button type="submit">💳 Вывести средства</button>
+</form>
+</div>
+<details class="instructions"><summary>Мои приглашения</summary><ul id="partner-invites"></ul></details>
+<details class="instructions"><summary>История начислений</summary><ul id="partner-earnings"></ul></details>
+<details class="instructions"><summary>История выплат</summary><ul id="partner-payouts"></ul></details>
+</div>
+<details class="instructions"><summary>Как работает программа</summary>
+<p>Комиссию начисляем за первую подходящую покупку Pro за Stars. После удержания от 21 дня проверяем возвраты и обеспечиваем начисление реальными USDT. Заявки обрабатываем раз в неделю.</p></details>
+<details class="instructions"><summary>Правила и условия</summary>
+<p>Участие бесплатное. Учитывается первый действительный пригласивший. Самоприглашения, тестовые оплаты, продления и возвраты исключены. Вывод возможен на подтверждённый TON-кошелёк. Сетевую комиссию перевода оплачивает Finder Candles. Партнёр отвечает за свои налоговые обязательства по применимому законодательству.</p></details>
+<p id="partner-message" role="status" aria-live="polite"></p>
 </section>
 </main>
 </body>

@@ -49,6 +49,8 @@ from vision import UnreliableScreenshot, extract_candles, extract_marks, extract
 import billing
 import discounts
 import mini_orders
+import partner_admin
+import partner_finance
 import subscription_guard
 import storage
 import brain
@@ -504,6 +506,8 @@ def admin_view(chat_id):
             [{"text": "💾 Копия базы", "callback_data": "adm:backup"},
              {"text": "🔄 Обновить", "callback_data": "adm:home"}],
             [{"text": "🎁 Скидки", "callback_data": "adm:d:home"}], [TO_MENU]]
+    if partner_finance.enabled() or partner_finance.cutover():
+        rows.insert(-1, [{"text": "🤝 Партнёрская программа", "callback_data": "partneradmin"}])
     return billing.stats() + wallet + "\n\n" + ADMIN_HELP, {"inline_keyboard": rows}
 
 
@@ -1833,9 +1837,23 @@ def handle_message(message):
     if "refunded_payment" in message:
         handle_refunded(message)
         return
-    remember_username(message)
     chat_id = message["chat"]["id"]
     text = message.get("text", "").strip()
+    command, _, args = text.partition(" ")
+    command = command.split("@", 1)[0].lower()
+    if command == "/partners":
+        if private_sender(message) == chat_id and billing.is_admin(chat_id):
+            def manage_partners():
+                try:
+                    info = partner_admin.command(chat_id, args)
+                except partner_finance.Error as error:
+                    info = str(error)
+                send_message(info, chat_id)
+            background(manage_partners)
+        return
+    if command == "/start" and args.startswith("fc_") and private_sender(message) == chat_id:
+        partner_finance.attribute(chat_id, args[3:].strip())
+    remember_username(message)
     if (text and not text.startswith("/") and private_sender(message) == chat_id and billing.is_admin(chat_id)
             and discount_admin_text(chat_id, text)):
         return
@@ -2653,6 +2671,12 @@ def handle_callback(query):
     if not data.startswith("vote:"):
         answer_callback(query["id"], "✅ Оценка сохранена" if data.startswith("rv:") else None)
 
+    if data == "partneradmin":
+        if private_sender({"chat": message["chat"], "from": query.get("from")}) == chat_id and billing.is_admin(chat_id):
+            show_view(chat_id, message_id, (partner_admin.report() + "\n\nКоманды: /partners help",
+                      {"inline_keyboard": [[{"text": "⬅️ Назад", "callback_data": "adm:home"}]]}), media)
+        return
+
     if data == "noop":
         return
 
@@ -3045,6 +3069,7 @@ class Chores:
     def discount_refunds():
         discounts.retry_refunds(api_post)
         subscription_guard.process_conflicts(api_post)
+        partner_finance.send_notifications(api_post)
 
     @staticmethod
     def reminders():

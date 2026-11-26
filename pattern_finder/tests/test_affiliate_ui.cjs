@@ -8,68 +8,50 @@ const script = readFileSync(join(__dirname, "../miniapp/app.js"), "utf8");
 
 function fixture() {
   const nodes = new Map();
-  const timers = [];
   const requests = [];
-  let closed = 0;
-  let respond;
+  let active = false;
   function element(id) {
     if (!nodes.has(id)) {
       nodes.set(id, {
-        hidden: true, disabled: false, open: false, textContent: "",
-        replaceChildren() {},
-        addEventListener(name, handler) { this[name] = () => handler({currentTarget: this}); }
+        hidden: true, disabled: false, textContent: "", value: "",
+        replaceChildren(...children) { this.children = children; },
+        addEventListener(name, handler) {
+          this[name] = () => handler({currentTarget: this, preventDefault() {}});
+        }
       });
     }
     return nodes.get(id);
   }
-  vm.runInNewContext(script, {
-    window: {Telegram: {WebApp: {
-      initData: "signed", ready() {}, expand() {}, onEvent() {}, close() { closed++; }
-    }}},
-    document: {documentElement: {dataset: {}}, getElementById: element, querySelectorAll: () => []},
-    setTimeout: fn => timers.push(fn),
-    fetch: (path, options) => {
-      if (path === "/api/state") {
-        return Promise.resolve({ok: true, json: async () => ({plans: [], affiliate_active: true})});
-      }
+  const context = vm.createContext({
+    window: {Telegram: {WebApp: {initData: "signed", ready() {}, expand() {}, onEvent() {}}}},
+    document: {documentElement: {dataset: {}}, getElementById: element, querySelectorAll: () => [],
+               createElement: () => ({})},
+    fetch: async (path, options) => {
       requests.push([path, options]);
-      return new Promise(resolve => { respond = resolve; });
+      if (path === "/api/partners/register") active = true;
+      return {ok: true, json: async () => ({
+        enabled: true, commission: 10, registered: active, link: "https://t.me/findercandles_bot?start=fc_example",
+        invited: 2, invitations: [[1800000000, "purchased"]], purchases: 1, wallet: null,
+        available: "0", held: "0", reserved: "0", paid: "0",
+        debt: "0", minimum: "10", remaining: "10", counts: {pending: 1}, earnings: [], payouts: [], plans: []
+      })};
     }
   });
-  return {element, timers, requests, closed: () => closed,
-          respond: (ok, body) => respond({ok, json: async () => body})};
+  vm.runInContext(script, context);
+  return {element, requests, load: () => vm.runInContext("loadPartners()", context)};
 }
 
-test("successful delivery closes Mini App and rapid presses send one request", async () => {
+test("partner sees real backend data and registration submits only signed auth", async () => {
   const ui = fixture();
-  const button = ui.element("affiliate-open");
-  const first = button.click();
-  await button.click();
-  assert.equal(button.disabled, true);
-  assert.equal(ui.requests.length, 1);
-  assert.equal(ui.requests[0][0], "/api/affiliate-message");
-  assert.equal(ui.requests[0][1].headers["X-Telegram-Init-Data"], "signed");
-  assert.equal(ui.requests[0][1].body, "{}");
-  assert.equal(ui.closed(), 0);
-  ui.respond(true, {sent: true});
-  await first;
-  assert.match(ui.element("affiliate-navigation").textContent, /отправлена/);
-  assert.equal(ui.timers.length, 1);
-  ui.timers[0]();
-  assert.equal(ui.closed(), 1);
-});
-
-test("failure and unconfirmed success keep Mini App open and offer instructions", async () => {
-  const ui = fixture();
-  const button = ui.element("affiliate-open");
-  for (const [ok, body] of [[false, {error: "Разблокируй бота."}], [true, {}]]) {
-    const request = button.click();
-    ui.respond(ok, body);
-    await request;
-    assert.equal(button.disabled, false);
-    assert.equal(ui.element("affiliate-steps").open, true);
-    assert.equal(ui.timers.length, 0);
-    assert.equal(ui.closed(), 0);
-  }
-  assert.match(ui.element("affiliate-navigation").textContent, /не подтверждена/);
+  await ui.load();
+  assert.equal(ui.element("partner-start").hidden, false);
+  await ui.element("partner-register").click();
+  const [, request] = ui.requests.find(([path]) => path === "/api/partners/register");
+  assert.equal(request.headers["X-Telegram-Init-Data"], "signed");
+  assert.equal(request.body, "{}");
+  assert.match(ui.element("partner-link").value, /start=fc_example$/);
+  assert.match(ui.element("partner-counts").textContent, /Приглашено: 2/);
+  assert.match(ui.element("partner-invites").children[0].textContent, /оплатил Pro$/);
+  assert.equal(ui.element("partner-form").hidden, true);
+  assert.equal(ui.element("partner-connect").hidden, false);
 });

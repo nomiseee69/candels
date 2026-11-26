@@ -9,6 +9,7 @@ telegram?.onEvent("themeChanged", theme);
 telegram?.ready();
 telegram?.expand();
 document.querySelectorAll("[data-panel]").forEach(button => button.addEventListener("click", () => {
+  if (button.dataset.panel === "partners") loadPartners();
   document.querySelectorAll("[data-panel]").forEach(tab => {
     const active = tab === button;
     tab.setAttribute("aria-pressed", active);
@@ -16,40 +17,6 @@ document.querySelectorAll("[data-panel]").forEach(button => button.addEventListe
   });
 }));
 element("close").addEventListener("click", () => telegram?.close());
-element("affiliate-open").addEventListener("click", async event => {
-  const button = event.currentTarget;
-  if (button.disabled) return;
-  button.disabled = true;
-  const status = element("affiliate-navigation");
-  status.hidden = false;
-  status.textContent = "Отправляю кнопку в чат…";
-  try {
-    if (!telegram?.initData) throw new Error("Открой приложение заново из Telegram.");
-    const reply = await api("affiliate-message");
-    if (reply.sent !== true) throw new Error("Отправка не подтверждена. Проверь чат или повтори попытку.");
-  } catch (error) {
-    status.textContent = error.message === "Failed to fetch" ? "Нет связи с сервером. Повтори попытку." : error.message;
-    element("affiliate-steps").open = true;
-    button.disabled = false;
-    return;
-  }
-  status.textContent = "Кнопка отправлена в чат с ботом.";
-  setTimeout(() => telegram?.close?.(), 450);
-});
-
-element("affiliate-copy").addEventListener("click", async () => {
-  const username = element("affiliate-username");
-  const status = element("affiliate-copy-status");
-  try {
-    await navigator.clipboard.writeText(username.value);
-    status.textContent = "Имя бота скопировано.";
-  } catch {
-    username.focus();
-    username.select();
-    status.textContent = "Не удалось скопировать автоматически. Имя выделено: выбери «Копировать».";
-  }
-});
-
 async function api(path, body = {}) {
   const response = await fetch("/api/" + path, {
     method: "POST", headers: {"Content-Type": "application/json", "X-Telegram-Init-Data": telegram.initData},
@@ -64,10 +31,6 @@ function render(data) {
   const date = data.until ? new Date(data.until * 1000).toLocaleDateString("ru-RU") : "";
   element("status").textContent = data.pro ?
     (data.trial ? "Пробный Pro" : "Pro") + (date ? " до " + date : "") : "Free";
-  element("affiliate-guide").hidden = !data.affiliate_active;
-  element("affiliate-terms").textContent = data.affiliate_active
-    ? "Приглашай друзей и получай 10% в Telegram Stars от их подходящих покупок в течение одного месяца."
-    : "Партнёрская программа пока не открыта.";
   element("access").hidden = data.scans_left == null && !data.purchase_blocked;
   element("access-text").textContent = data.purchase_blocked
     ? (data.cancelled ? "Автопродление отключено через Finder Candles. " :
@@ -158,3 +121,134 @@ if (telegram?.initData) {
   element("status").textContent = "—";
   message("Открой приложение из Telegram.");
 }
+
+// Partner controls are loaded on demand, independently of Pro checkout.
+let partnerState;
+let walletUi;
+let challenge;
+const partnerText = text => { element("partner-message").textContent = text; };
+const labels = {pending:"ожидает сверки", matured_unfunded:"ожидает обеспечения",
+  funded:"обеспечено", reversed:"отменено", requested:"на проверке", approved:"одобрено",
+  submitted:"обрабатывается", paid:"выплачено", rejected:"отклонено", cancelled:"отменено"};
+const inviteLabels = {invited: "присоединился", purchased: "оплатил Pro", reversed: "возврат оплаты"};
+const dateText = stamp => new Date(stamp * 1000).toLocaleDateString("ru-RU");
+function list(id, rows) {
+  element(id).replaceChildren(...(rows.length ? rows : ["Пока нет записей"]).map(text => {
+    const li = document.createElement("li");
+    li.textContent = text;
+    return li;
+  }));
+}
+
+async function loadPartners() {
+  try {
+    const s = partnerState = await api("partners/state");
+    element("partner-terms").textContent = s.enabled ?
+      `Приглашай друзей и получай ${s.commission}% чистого дохода с их первой подходящей покупки Pro.` :
+      "Регистрация пока закрыта.";
+    element("partner-start").hidden = !s.enabled || s.registered;
+    element("partner-panel").hidden = !s.registered;
+    if (!s.registered) return;
+    element("partner-link").value = s.link;
+    element("partner-counts").textContent = `Приглашено: ${s.invited} · первых покупок: ${s.purchases}`;
+    list("partner-invites", s.invitations.map(([at, state]) => `${dateText(at)} · ${inviteLabels[state]}`));
+    element("partner-balances").textContent = `Доступно: ${s.available} · в заявках: ${s.reserved} · выплачено: ${s.paid} USDT`;
+    element("partner-held").textContent = `Ожидают обеспечения или сверки: ${(s.counts.pending || 0) + (s.counts.matured_unfunded || 0)}` +
+      (s.held !== "0" ? ` · на сверке резерва: ${s.held} USDT` : "") +
+      (s.debt !== "0" ? ` · корректировка после возврата: ${s.debt} USDT` : "");
+    element("partner-wallet").textContent = s.wallet ?
+      s.wallet.address.slice(0, 10) + "…" + s.wallet.address.slice(-6) + " · подтверждён" : "Кошелёк пока не подключён";
+    const hasOpen = s.payouts.some(row => ["requested", "approved", "submitted"].includes(row[2]));
+    element("partner-connect").hidden = !s.enabled || Boolean(s.wallet) || hasOpen;
+    element("partner-disconnect").hidden = !s.wallet || hasOpen;
+    element("partner-threshold").textContent = hasOpen ? "⏳ Выплата обрабатывается" :
+      s.wallet?.unlock * 1000 > Date.now() ? "После смены адреса вывод временно ограничен." :
+      s.remaining !== "0" ? `Минимальный вывод: ${s.minimum} USDT. Осталось накопить ${s.remaining} USDT.` :
+      s.can_request ? `Минимальный вывод: ${s.minimum} USDT.` : "Заявка пока недоступна.";
+    element("partner-form").hidden = !s.can_request;
+    list("partner-earnings", s.earnings.map(([plan, at, state, units]) =>
+      `${dateText(at)} · ${plan === "month" ? "месяц" : "год"} · ${labels[state]}${units == null ? "" : " · " + microText(units) + " USDT"}`));
+    list("partner-payouts", s.payouts.map(([id, units, state, due, reason]) =>
+      `№${id} · ${microText(units)} USDT · ${labels[state]}` +
+      (["requested", "approved", "submitted"].includes(state) ? ` · обработка до ${dateText(due)}` : "") +
+      (reason ? ` · ${reason}` : "")));
+  } catch (error) {
+    element("partner-terms").textContent = telegram?.initData ? "Раздел временно недоступен." : "Открой приложение из Telegram.";
+    partnerText(error.message);
+  }
+}
+
+function microText(units) {
+  const amount = BigInt(units);
+  return (amount / 1000000n).toString() + "." + (amount % 1000000n).toString().padStart(6, "0");
+}
+
+function partnerClick(id, action, eventName = "click") {
+  element(id).addEventListener(eventName, async event => {
+    event.preventDefault();
+    const control = event.currentTarget;
+    const button = eventName === "submit" ? control.querySelector("button") : control;
+    if (button.disabled) return;
+    button.disabled = true;
+    partnerText("");
+    try { await action(control); }
+    catch (error) { partnerText(error.message || "Попробуй позже."); }
+    finally { button.disabled = false; }
+  });
+}
+partnerClick("partner-register", async () => { await api("partners/register"); await loadPartners(); });
+partnerClick("partner-copy", async () => {
+  const field = element("partner-link");
+  try { await navigator.clipboard.writeText(field.value); partnerText("Ссылка скопирована."); }
+  catch { field.focus(); field.select(); partnerText("Выделил ссылку. Выбери «Копировать»."); }
+});
+
+async function connectUi() {
+  if (walletUi) return walletUi;
+  await new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = partnerState.sdk;
+    script.crossOrigin = "anonymous";
+    script.integrity = "sha384-zGhKyT491TjdZycV4y1fa0Z1NUdta5MUDimkZ5n6+32EFHhkv74w3mzohlRK3X50";
+    script.onload = resolve;
+    script.onerror = () => { script.remove(); reject(new Error("TON Connect недоступен.")); };
+    document.head.append(script);
+  });
+  walletUi = new window.TON_CONNECT_UI.TonConnectUI({manifestUrl: partnerState.manifest});
+  walletUi.onStatusChange(async wallet => {
+    if (!wallet || !challenge) return;
+    const proof = wallet.connectItems?.tonProof?.proof;
+    if (!proof || proof.payload !== challenge) {
+      challenge = undefined;
+      partnerText("Кошелёк не предоставил актуальное подтверждение TON. Попробуй подключить совместимый кошелёк.");
+      return;
+    }
+    challenge = undefined;
+    try {
+      await api("partners/verify", {account: wallet.account, proof});
+      await loadPartners();
+      partnerText("Кошелёк подтверждён.");
+    } catch (error) { partnerText(error.message); }
+  });
+  await walletUi.connectionRestored;
+  return walletUi;
+}
+partnerClick("partner-connect", async () => {
+  const ui = await connectUi();
+  if (ui.connected) await ui.disconnect();
+  const result = await api("partners/challenge");
+  challenge = result.payload;
+  ui.setConnectRequestParameters({state: "ready", value: {tonProof: challenge}});
+  await ui.openModal();
+});
+partnerClick("partner-disconnect", async () => {
+  await api("partners/disconnect");
+  if (walletUi?.connected) await walletUi.disconnect();
+  await loadPartners();
+});
+partnerClick("partner-form", async form => {
+  const result = await api("partners/request", {amount: new FormData(form).get("amount").trim()});
+  form.reset();
+  await loadPartners();
+  partnerText(`Заявка №${result.request} принята.`);
+}, "submit");

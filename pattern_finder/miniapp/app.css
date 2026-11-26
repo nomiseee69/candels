@@ -49,3 +49,6 @@ h2{font-size:19px}
 .affiliate-flow h2+p,.affiliate-flow details{margin-top:8px}
 .affiliate-flow summary{cursor:pointer;color:var(--accent);font-weight:650;padding:8px 0}
 .affiliate-flow blockquote{margin:8px 0 0;padding-left:12px;border-left:2px solid var(--accent);color:var(--muted)}
+
+#partner-form input{display:block;max-width:100%;margin:6px 0 10px;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font:inherit}
+#partner-panel details summary{cursor:pointer;color:var(--accent)}

@@ -186,64 +186,10 @@ def test_existing_schema_preserves_settings_and_shared_database(tmp_path):
     assert storage.get_user(BUYER)["settings"] == {"coins": 42}
 
 
-def test_affiliate_chat_requires_auth_and_uses_signed_recipient(monkeypatch):
-    calls = []
 
-    def send(method, data):
-        calls.append((method, data))
-        return {"ok": True, "result": {"message_id": 91}}
-
-    monkeypatch.setattr(notifier, "api_post", send)
+def test_old_native_route_retired_and_partner_status_requires_auth(monkeypatch):
     monkeypatch.setenv("MINI_APP_AFFILIATE_ACTIVE", "1")
-    for auth in ("", signed(time_offset=-901), signed().replace(str(BUYER), "99999")):
-        assert invoke("/api/affiliate-message", {}, auth)[0] == "401 Unauthorized"
-    assert not calls
-    assert invoke("/api/affiliate-message", {"user_id": 99999}, signed()) == ("200 OK", {"sent": True})
-    (method, data), = calls
-    assert method == "sendMessage" and data["chat_id"] == BUYER
-    assert json.loads(data["reply_markup"]) == {"inline_keyboard": [[{
-        "text": "🚀 Открыть партнёрскую программу", "url": "tg://settings/stars/earn"}]]}
-    assert all(text in data["text"] for text in (
-        "10%", "одного месяца", "Дата запуска", "@findercandles_bot", "Персональную ссылку создаст Telegram"))
-    status, body = invoke("/api/affiliate-message", {}, signed())
-    assert status == "429 Too Many Requests" and 0 < body["retry_after"] <= 60
-    assert len(calls) == 1
-
-
-@pytest.mark.parametrize("reply,status,hint", [
-    ({"ok": False, "error_code": 403}, "403 Forbidden", "разблокируй"),
-    ({"ok": False, "error_code": 400}, "403 Forbidden", "нажми «Старт»"),
-    ({"ok": False}, "503 Service Unavailable", "не подтвердил"),
-    ({"ok": True, "result": {}}, "503 Service Unavailable", "не подтвердил"),
-])
-def test_affiliate_chat_failure_does_not_report_delivery(monkeypatch, reply, status, hint):
-    monkeypatch.setenv("MINI_APP_AFFILIATE_ACTIVE", "1")
-    monkeypatch.setattr(notifier, "api_post", lambda *args: reply)
-    actual_status, body = invoke("/api/affiliate-message", {}, signed())
-    assert actual_status == status and "sent" not in body and hint in body["error"]
-
-
-def test_affiliate_chat_serializes_parallel_requests(monkeypatch):
-    from concurrent.futures import ThreadPoolExecutor
-    from threading import Event
-
-    sending, finish = Event(), Event()
-
-    def send(*args):
-        sending.set()
-        assert finish.wait(5)
-        return {"ok": True, "result": {"message_id": 91}}
-
-    monkeypatch.setenv("MINI_APP_AFFILIATE_ACTIVE", "1")
-    monkeypatch.setattr(notifier, "api_post", send)
-    auth = signed()
-    with ThreadPoolExecutor(2) as pool:
-        first = pool.submit(invoke, "/api/affiliate-message", {}, auth)
-        try:
-            assert sending.wait(5)
-            assert invoke("/api/affiliate-message", {}, auth)[0] == "429 Too Many Requests"
-        finally:
-            finish.set()
-        assert first.result(timeout=5)[0] == "200 OK"
-    monkeypatch.setenv("MINI_APP_AFFILIATE_ACTIVE", "0")
-    assert invoke("/api/affiliate-message", {}, auth)[0] == "403 Forbidden"
+    assert invoke("/api/affiliate-message", {}, signed())[0] == "404 Not Found"
+    assert invoke("/api/partners/state", {}, "")[0] == "401 Unauthorized"
+    assert not invoke("/api/partners/state", {}, signed())[1]["enabled"]
+    assert invoke("/api/partners/register", {}, signed())[0] == "400 Bad Request"
