@@ -143,28 +143,34 @@ function list(id, rows) {
 async function loadPartners() {
   try {
     const s = partnerState = await api("partners/state");
-    element("partner-terms").textContent = s.enabled ?
-      `Приглашай друзей и получай ${s.commission}% чистого дохода с их первой подходящей покупки Pro.` :
+    element("partner-terms").textContent = s.enabled || s.registered ?
+      s.attribution_open === false ? "Ссылку можно получить заранее. Приглашения начнут учитываться после открытия программы." :
+        `Приглашай друзей и получай ${s.commission}% чистого дохода с их первой подходящей покупки Pro.` :
       "Регистрация пока закрыта.";
+    element("partner-rules").textContent = `Комиссия ${s.commission}% с первой подходящей покупки Pro. Минимальный вывод ${cents(s.minimum)} USDT.`;
     element("partner-start").hidden = !s.enabled || s.registered;
     element("partner-panel").hidden = !s.registered;
     if (!s.registered) return;
     element("partner-link").value = s.link;
     element("partner-counts").textContent = `Приглашено: ${s.invited} · первых покупок: ${s.purchases}`;
     list("partner-invites", s.invitations.map(([at, state]) => `${dateText(at)} · ${inviteLabels[state]}`));
-    element("partner-balances").textContent = `Доступно: ${s.available} · в заявках: ${s.reserved} · выплачено: ${s.paid} USDT`;
-    element("partner-held").textContent = `Ожидают обеспечения или сверки: ${(s.counts.pending || 0) + (s.counts.matured_unfunded || 0)}` +
-      (s.held !== "0" ? ` · на сверке резерва: ${s.held} USDT` : "") +
-      (s.debt !== "0" ? ` · корректировка после возврата: ${s.debt} USDT` : "");
+    element("partner-available").textContent = cents(s.available);
+    element("partner-balances").textContent = `Зарезервировано ${cents(s.reserved)} · выплачено ${cents(s.paid)} USDT`;
+    element("partner-held").textContent = [
+      s.estimated != null ? `Ожидается ≈ ${cents(s.estimated)} USDT (оценка)` : "",
+      s.unquoted ? `Без расчётного курса ${s.unquoted}` : "",
+      s.held !== "0" ? `На сверке резерва ${cents(s.held)} USDT` : "",
+      s.debt !== "0" ? `Корректировка после возврата ${cents(s.debt)} USDT` : ""
+    ].filter(Boolean).join(" · ");
     element("partner-wallet").textContent = s.wallet ?
       s.wallet.address.slice(0, 10) + "…" + s.wallet.address.slice(-6) + " · подтверждён" : "Кошелёк пока не подключён";
     const hasOpen = s.payouts.some(row => ["requested", "approved", "submitted"].includes(row[2]));
-    element("partner-connect").hidden = !s.enabled || Boolean(s.wallet) || hasOpen;
+    element("partner-connect").hidden = s.wallet_connect === false || Boolean(s.wallet) || hasOpen;
     element("partner-disconnect").hidden = !s.wallet || hasOpen;
     element("partner-threshold").textContent = hasOpen ? "⏳ Выплата обрабатывается" :
       s.wallet?.unlock * 1000 > Date.now() ? "После смены адреса вывод временно ограничен." :
-      s.remaining !== "0" ? `Минимальный вывод: ${s.minimum} USDT. Осталось накопить ${s.remaining} USDT.` :
-      s.can_request ? `Минимальный вывод: ${s.minimum} USDT.` : "Заявка пока недоступна.";
+      s.remaining !== "0" ? `До вывода осталось ${cents(s.remaining, true)} USDT.` :
+      s.can_request ? `Минимальный вывод ${cents(s.minimum)} USDT.` : "Заявка пока недоступна.";
     element("partner-form").hidden = !s.can_request;
     list("partner-earnings", s.earnings.map(([plan, at, state, units]) =>
       `${dateText(at)} · ${plan === "month" ? "месяц" : "год"} · ${labels[state]}${units == null ? "" : " · " + microText(units) + " USDT"}`));
@@ -181,6 +187,17 @@ async function loadPartners() {
 function microText(units) {
   const amount = BigInt(units);
   return (amount / 1000000n).toString() + "." + (amount % 1000000n).toString().padStart(6, "0");
+}
+
+function unitsFromDecimal(value) {
+  const [integer, fraction = ""] = value.split(".");
+  return BigInt(integer) * 1000000n + BigInt(fraction.padEnd(6, "0"));
+}
+
+function cents(value, roundUp = false) {
+  const units = unitsFromDecimal(value);
+  const hundredths = (units + (roundUp ? 9999n : 0n)) / 10000n;
+  return `${hundredths / 100n},${String(hundredths % 100n).padStart(2, "0")}`;
 }
 
 function partnerClick(id, action, eventName = "click") {
@@ -246,8 +263,16 @@ partnerClick("partner-disconnect", async () => {
   if (walletUi?.connected) await walletUi.disconnect();
   await loadPartners();
 });
+partnerClick("partner-all", async () => {
+  const field = element("partner-amount");
+  field.value = partnerState.available;
+  field.focus();
+});
 partnerClick("partner-form", async form => {
-  const result = await api("partners/request", {amount: new FormData(form).get("amount").trim()});
+  const amount = element("partner-amount").value.trim().replace(",", ".");
+  if (!/^\d{1,9}(?:\.\d{1,6})?$/.test(amount)) throw new Error("Укажи сумму в USDT.");
+  if (unitsFromDecimal(amount) > unitsFromDecimal(partnerState.available)) throw new Error("Сумма выше доступного остатка.");
+  const result = await api("partners/request", {amount});
   form.reset();
   await loadPartners();
   partnerText(`Заявка №${result.request} принята.`);

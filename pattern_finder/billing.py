@@ -289,8 +289,9 @@ def stars_paid(chat_id, payment, now=None):
             return "⚠️ Повторная покупка. Доступ сохранён, оплата направлена на возврат."
         if not guard.renewal(payment):
             guard.release(db, chat_id)
-        storage.add_payment_in(db, charge, chat_id, "stars", plan, payment["total_amount"], "XTR", data=payment)
-        partner_finance.record_purchase(db, chat_id, charge, plan, payment, now)
+        storage.add_payment_in(db, charge, chat_id, "stars", plan, payment["total_amount"], "XTR",
+                               data=partner_finance.purchase_data(payment, now))
+        partner_finance.observe_purchase(db, chat_id, charge, plan, payment, now)
         expiration = payment.get("subscription_expiration_date")
         until = storage.update_user_in(db, chat_id, lambda user: extend_user(
             user, None if expiration else PLANS[plan][0], "stars", expiration, bool(expiration), now))
@@ -312,7 +313,7 @@ def stars_refunded(chat_id, refund):
                 "invoice_payload" in refund and refund["invoice_payload"] != json.loads(data).get("invoice_payload")):
             return False
         db.execute("UPDATE payments SET status='refunded' WHERE id=?", (charge,))
-        partner_finance.reverse(db, charge)
+        partner_finance.observe_refund(db, charge, admins())
         if status == "conflict":
             guard.refund_extra(db, chat_id, charge)
             return True

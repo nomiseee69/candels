@@ -49,6 +49,7 @@ from vision import UnreliableScreenshot, extract_candles, extract_marks, extract
 import billing
 import discounts
 import mini_orders
+import mini_star_audit
 import partner_admin
 import partner_finance
 import subscription_guard
@@ -454,6 +455,8 @@ ADMIN_HELP = ("🛠 Админ-панель — всё кнопками ниже
 USERS_PAGE = 8
 broadcast_draft = {}            # админ → текст рассылки, ждёт подтверждения
 writing_broadcast = set()       # админ нажал «📣 Рассылка» — следующее сообщение = текст
+partner_prompts = {}
+partner_prompts_lock = threading.Lock()
 
 
 def stars_balance():
@@ -1844,6 +1847,8 @@ def handle_message(message):
     if command == "/partners":
         if private_sender(message) == chat_id and billing.is_admin(chat_id):
             def manage_partners():
+                if not billing.is_admin(chat_id):
+                    return
                 try:
                     info = partner_admin.command(chat_id, args)
                 except partner_finance.Error as error:
@@ -1851,6 +1856,28 @@ def handle_message(message):
                 send_message(info, chat_id)
             background(manage_partners)
         return
+    reply_to = (message.get("reply_to_message") or {}).get("message_id")
+    if reply_to and text and private_sender(message) == chat_id and billing.is_admin(chat_id):
+        with partner_prompts_lock:
+            draft = partner_prompts.get(chat_id)
+            if draft and draft[0] == reply_to:
+                partner_prompts.pop(chat_id)
+            else:
+                draft = None
+        if draft:
+            _, expires, prompt = draft
+            if expires < time.monotonic():
+                send_message("Время ввода истекло. Открой действие заново.", chat_id)
+            else:
+                def complete_partner_input():
+                    if not billing.is_admin(chat_id):
+                        return
+                    try:
+                        show_view(chat_id, None, partner_admin.panel_reply(chat_id, prompt.action, prompt.target, text))
+                    except partner_finance.Error as error:
+                        send_message(str(error), chat_id)
+                background(complete_partner_input)
+            return
     if command == "/start" and args.startswith("fc_") and private_sender(message) == chat_id:
         partner_finance.attribute(chat_id, args[3:].strip())
     remember_username(message)
@@ -2671,10 +2698,23 @@ def handle_callback(query):
     if not data.startswith("vote:"):
         answer_callback(query["id"], "✅ Оценка сохранена" if data.startswith("rv:") else None)
 
-    if data == "partneradmin":
+    if data == "partneradmin" or data.startswith("pa:"):
         if private_sender({"chat": message["chat"], "from": query.get("from")}) == chat_id and billing.is_admin(chat_id):
-            show_view(chat_id, message_id, (partner_admin.report() + "\n\nКоманды: /partners help",
-                      {"inline_keyboard": [[{"text": "⬅️ Назад", "callback_data": "adm:home"}]]}), media)
+            def render_partner_admin():
+                if not billing.is_admin(chat_id):
+                    return
+                try:
+                    result = partner_admin.panel(chat_id, "home" if data == "partneradmin" else data[3:])
+                    if isinstance(result, partner_admin.Prompt):
+                        prompt_id = send_message(result.text, chat_id, {"force_reply": True, "selective": True})
+                        if prompt_id:
+                            with partner_prompts_lock:
+                                partner_prompts[chat_id] = (prompt_id, time.monotonic()+300, result)
+                    else:
+                        show_view(chat_id, message_id, result, media)
+                except partner_finance.Error as error:
+                    send_message(str(error), chat_id)
+            background(render_partner_admin)
         return
 
     if data == "noop":
@@ -3035,7 +3075,8 @@ class Chores:
     раз в минуту — проверить оплаты картой; раз в час — напоминания о продлении;
     раз в сутки — резервная копия базы."""
 
-    EVERY = {"expired_photos": 60, "payments": 60, "discount_refunds": 60, "reminders": 3600, "backup": 86400}
+    EVERY = {"expired_photos": 60, "payments": 60, "discount_refunds": 60, "partner_reconcile": 120,
+             "reminders": 3600, "backup": 86400}
 
     def __init__(self):
         self.last = {name: 0 for name in self.EVERY}
@@ -3070,6 +3111,14 @@ class Chores:
         discounts.retry_refunds(api_post)
         subscription_guard.process_conflicts(api_post)
         partner_finance.send_notifications(api_post)
+
+    @staticmethod
+    def partner_reconcile():
+        if partner_finance.flag("REFERRALS_ENABLED") or partner_finance.cutover():
+            try:
+                mini_star_audit.refresh(api_post)
+            except partner_finance.Error:
+                pass  # The failed status is recorded and prevents dispatch/release.
 
     @staticmethod
     def reminders():

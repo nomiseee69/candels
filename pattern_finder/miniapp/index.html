@@ -37,6 +37,7 @@
 </div>
 <div class="instructions">
 <h2>Баланс</h2>
+<p class="partner-total"><strong id="partner-available">0,00</strong> <span>USDT доступно</span></p>
 <p id="partner-balances"></p>
 <p id="partner-held"></p>
 </div>
@@ -47,8 +48,9 @@
 <button type="button" id="partner-disconnect" hidden>Отключить</button>
 <p id="partner-threshold"></p>
 <form id="partner-form" hidden>
-<label>Сумма в USDT <input name="amount" inputmode="decimal" required maxlength="16"></label>
-<button type="submit">💳 Вывести средства</button>
+<label>Сумма в USDT <input id="partner-amount" name="amount" inputmode="decimal" required maxlength="16"></label>
+<div class="partner-actions"><button type="submit">💳 Вывести средства</button>
+<button type="button" id="partner-all">Вывести всё</button></div>
 </form>
 </div>
 <details class="instructions"><summary>Мои приглашения</summary><ul id="partner-invites"></ul></details>
@@ -58,7 +60,9 @@
 <details class="instructions"><summary>Как работает программа</summary>
 <p>Комиссию начисляем за первую подходящую покупку Pro за Stars. После удержания от 21 дня проверяем возвраты и обеспечиваем начисление реальными USDT. Заявки обрабатываем раз в неделю.</p></details>
 <details class="instructions"><summary>Правила и условия</summary>
-<p>Участие бесплатное. Учитывается первый действительный пригласивший. Самоприглашения, тестовые оплаты, продления и возвраты исключены. Вывод возможен на подтверждённый TON-кошелёк. Сетевую комиссию перевода оплачивает Finder Candles. Партнёр отвечает за свои налоговые обязательства по применимому законодательству.</p></details>
+<p id="partner-rules">По умолчанию комиссия составляет 10% с первой подходящей покупки Pro, минимальный вывод 10 USDT.</p>
+<p>Начисление ожидает минимум 21 день и становится доступным после подтверждения обеспечения. Выплаты USDT на TON Mainnet обрабатываются еженедельно по умолчанию. Возврат отменяет начисление. Уже выплаченная комиссия удерживается из следующих начислений.</p>
+<p>Участие бесплатное. Учитывается первый действительный пригласивший. Самоприглашения, тестовые оплаты и продления исключены. Сетевую комиссию оплачивает Finder Candles. Партнёр отвечает за свои налоговые обязательства.</p></details>
 <p id="partner-message" role="status" aria-live="polite"></p>
 </section>
 </main>

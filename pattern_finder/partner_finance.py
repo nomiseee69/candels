@@ -1,5 +1,6 @@
 """Finder Candles Partners. USDT amounts are integer micro-USDT."""
 import json
+import logging
 import os
 import re
 import secrets
@@ -55,6 +56,16 @@ CREATE TABLE IF NOT EXISTS fc_risk (partner INTEGER NOT NULL REFERENCES fc_partn
  at INTEGER NOT NULL, resolved INTEGER, PRIMARY KEY(partner,flag));
 CREATE TABLE IF NOT EXISTS fc_notifications (id INTEGER PRIMARY KEY, chat INTEGER NOT NULL, text TEXT NOT NULL,
  attempted INTEGER, sent INTEGER);
+CREATE TABLE IF NOT EXISTS fc_purchase_checked (charge TEXT PRIMARY KEY REFERENCES payments(id));
+CREATE TABLE IF NOT EXISTS fc_stars_sync (id INTEGER PRIMARY KEY CHECK(id=1), state TEXT NOT NULL,
+ started INTEGER NOT NULL, successful INTEGER);
+CREATE TABLE IF NOT EXISTS fc_dispatch (request INTEGER PRIMARY KEY REFERENCES fc_payout_requests(id), actor INTEGER NOT NULL,
+ prepared INTEGER NOT NULL, nonce TEXT NOT NULL, released INTEGER, released_by INTEGER);
+CREATE TABLE IF NOT EXISTS fc_tx_history (tx TEXT PRIMARY KEY, request INTEGER NOT NULL REFERENCES fc_payout_requests(id),
+ actor INTEGER, at INTEGER NOT NULL, reason TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS fc_operator_intents (token TEXT PRIMARY KEY, actor INTEGER NOT NULL, request INTEGER NOT NULL,
+ action TEXT NOT NULL, expected TEXT NOT NULL, value TEXT NOT NULL, reason TEXT NOT NULL, expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS fc_api_limits (scope TEXT PRIMARY KEY, expires INTEGER NOT NULL, hits INTEGER NOT NULL);
 """
 
 
@@ -66,7 +77,7 @@ def schema(db):
     for statement in SCHEMA.strip().rstrip(";").split(";"):
         db.execute(statement)
     for table in ("fc_referral_ledger", "fc_treasury_ledger", "fc_admin_audit", "fc_allocations", "fc_stars_batches",
-                  "fc_payout_transactions", "fc_rate_history", "fc_reversals"):
+                  "fc_payout_transactions", "fc_rate_history", "fc_reversals", "fc_tx_history"):
         for action in ("UPDATE", "DELETE"):
             db.execute(f"CREATE TRIGGER IF NOT EXISTS {table}_no_{action.lower()} BEFORE {action} ON {table} "
                        "BEGIN SELECT RAISE(ABORT,'append-only'); END")
@@ -89,6 +100,20 @@ def enabled(now=None):
     # Existing native referrals may remain eligible after the program is ended.
     return (flag("REFERRALS_ENABLED") and not flag("MINI_APP_AFFILIATE_ACTIVE")
             and 0 < cutover() <= timestamp(now) - 32 * DAY)
+
+
+def registration_enabled(db, now=None):
+    return ((enabled(now) or (flag("REFERRALS_ENABLED") and flag("REFERRAL_EARLY_REGISTRATION")))
+            and get_setting(db, "REFERRAL_REGISTRATION_OPEN", 1) == "1")
+
+
+def attribution_enabled(db, now=None):
+    return (flag("REFERRALS_ENABLED") and not flag("MINI_APP_AFFILIATE_ACTIVE")
+            and 0 < cutover() <= timestamp(now) and get_setting(db, "REFERRAL_ATTRIBUTION_OPEN", 1) == "1")
+
+
+def funding_enabled(db, now=None):
+    return enabled(now) and not flag("REFERRAL_TEST_MODE") and get_setting(db, "REFERRAL_FUNDING_OPEN", 1) == "1"
 
 
 def get_setting(db, key, default):
@@ -127,7 +152,8 @@ def set_setting(actor, key, value, reason):
         "REFERRAL_COMMISSION_PERCENT": (1, 100), "MINIMUM_PAYOUT_USDT": (10, 1000000),
         "REFERRAL_HOLD_DAYS": (21, 365), "WALLET_CHANGE_COOLDOWN_HOURS": (48, 720),
         "REFERRAL_PAYOUT_INTERVAL_DAYS": (1, 30), "REFERRAL_REGISTRATION_OPEN": (0, 1),
-        "REFERRAL_WITHDRAWALS_OPEN": (0, 1),
+        "REFERRAL_WITHDRAWALS_OPEN": (0, 1), "REFERRAL_ATTRIBUTION_OPEN": (0, 1),
+        "REFERRAL_FUNDING_OPEN": (0, 1), "REFERRAL_LARGE_PAYOUT_USDT": (10, 1000000),
     }
     if key not in limits or not value.isdecimal() or len(value) > 10 or not limits[key][0] <= int(value) <= limits[key][1]:
         raise Error("Недопустимая настройка.")
@@ -153,7 +179,7 @@ def link(partner):
         row = db.execute("SELECT code FROM fc_referral_codes WHERE partner=?", (partner,)).fetchone()
         if row:
             return "https://t.me/findercandles_bot?start=fc_" + row[0]
-        if not enabled() or get_setting(db, "REFERRAL_REGISTRATION_OPEN", 1) != "1":
+        if not registration_enabled(db):
             raise Error("Регистрация партнёров пока закрыта.")
         db.execute("INSERT OR IGNORE INTO fc_partners(id) VALUES (?)", (partner,))
         code = secrets.token_urlsafe(24)
@@ -168,13 +194,15 @@ def risk(db, partner, flag_name, at):
 
 def attribute(buyer, code, now=None):
     at = timestamp(now)
-    if not enabled(at) or buyer <= 0 or not re.fullmatch(r"[A-Za-z0-9_-]{32}", code):
+    if buyer <= 0 or not flag("REFERRALS_ENABLED") or not re.fullmatch(r"[A-Za-z0-9_-]{32}", code):
         return False
     with storage.transaction() as db:
         schema(db)
+        if not attribution_enabled(db, at):
+            return False
         row = db.execute("SELECT id,blocked FROM fc_referral_codes JOIN fc_partners ON id=partner WHERE code=?",
                          (code,)).fetchone()
-        if not row or row[0] == buyer or row[1] or get_setting(db, "REFERRAL_REGISTRATION_OPEN", 1) != "1":
+        if not row or row[0] == buyer or row[1]:
             return False
         if any(db.execute(sql, (buyer,)).fetchone() for sql in (
                 "SELECT 1 FROM users WHERE chat_id=CAST(? AS TEXT)", "SELECT 1 FROM payments WHERE chat_id=CAST(? AS TEXT)",
@@ -191,7 +219,7 @@ def attribute(buyer, code, now=None):
 
 def record_purchase(db, buyer, charge, plan, payment, now, discount=None):
     at = timestamp(now)
-    if (not enabled(at) or payment.get("currency") != "XTR" or payment.get("test") or payment.get("is_test")
+    if (payment.get("currency") != "XTR" or payment.get("test") or payment.get("is_test")
             or flag("REFERRAL_TEST_MODE") or type(payment.get("total_amount")) is not int
             or not 0 < payment["total_amount"] <= 10**8 or plan not in ("month", "year")
             or (payment.get("is_recurring") and not payment.get("is_first_recurring"))):
@@ -201,16 +229,12 @@ def record_purchase(db, buyer, charge, plan, payment, now, discount=None):
     if not row:
         return
     # A prior settled payment, even a later-refunded one, consumes the first purchase.
-    if db.execute("SELECT 1 FROM payments WHERE chat_id=? AND id!=? AND source='stars' AND currency='XTR' "
-                  "AND plan IN ('month','year') AND status IN ('succeeded','refunded') LIMIT 1",
-                  (str(buyer), charge)).fetchone():
+    if db.execute("SELECT 1 FROM payments WHERE chat_id=? AND source='stars' AND currency='XTR' "
+                  "AND plan IN ('month','year') AND status IN ('succeeded','refunded') "
+                  "AND rowid < (SELECT rowid FROM payments WHERE id=?) LIMIT 1", (str(buyer), charge)).fetchone():
         return
-    try:
-        bps = 100 * number(db, "REFERRAL_COMMISSION_PERCENT", 10, 1, 100)
-        hold = number(db, "REFERRAL_HOLD_DAYS", 21, 21, 365)
-    except Error:
-        audit(db, None, charge, "configuration", "Комиссия требует сверки настроек", at)
-        return
+    bps = 100 * number(db, "REFERRAL_COMMISSION_PERCENT", 10, 1, 100)
+    hold = number(db, "REFERRAL_HOLD_DAYS", 21, 21, 365)
     quote = db.execute("SELECT id,rate FROM fc_rate_history WHERE at BETWEEN ? AND ? ORDER BY id DESC LIMIT 1",
                        (at-30*DAY, at)).fetchone()
     stars = payment["total_amount"]
@@ -223,6 +247,55 @@ def record_purchase(db, buyer, charge, plan, payment, now, discount=None):
         if db.execute("SELECT COUNT(*) FROM fc_referral_commissions WHERE partner=? AND stars=? AND at>=?",
                       (row[0], stars, at - 3600)).fetchone()[0] >= 8:
             risk(db, row[0], "similar_purchases", at)
+
+
+def _isolated(db, operation):
+    db.execute("SAVEPOINT fc_payment_hook")
+    try:
+        operation()
+    except Exception:
+        db.execute("ROLLBACK TO fc_payment_hook")
+        logging.getLogger(__name__).warning("Partner payment processing deferred to reconciliation")
+    finally:
+        db.execute("RELEASE fc_payment_hook")
+
+
+def observe_purchase(db, buyer, charge, plan, payment, now, discount=None):
+    # The validated row in payments is the durable input if the partner savepoint fails.
+    if flag("REFERRAL_TEST_MODE") or payment.get("test") or payment.get("is_test"):
+        return
+    def store():
+        record_purchase(db, buyer, charge, plan, payment, now, discount)
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='fc_purchase_checked'").fetchone():
+            db.execute("INSERT OR IGNORE INTO fc_purchase_checked VALUES (?)", (charge,))
+    _isolated(db, store)
+
+
+def purchase_data(payment, now, discount=None):
+    return {**payment, "finder_referral_at": timestamp(now), "finder_referral_discount": discount,
+            "finder_referral_test": flag("REFERRAL_TEST_MODE")}
+
+
+def observe_refund(db, charge, admin_ids=()):
+    _isolated(db, lambda: reverse(db, charge, admin_ids=admin_ids))
+
+
+def replay_payments(db, admin_ids=()):
+    if flag("REFERRAL_TEST_MODE"):
+        return
+    for charge, buyer, plan, raw, at in db.execute("""SELECT p.id, a.buyer, p.plan, p.data, p.at FROM payments p
+        JOIN fc_referral_attributions a ON p.chat_id=CAST(a.buyer AS TEXT) AND p.at>=a.at
+        WHERE p.source='stars' AND p.currency='XTR' AND p.status='succeeded' AND p.plan IN ('month','year')
+        AND NOT EXISTS(SELECT 1 FROM fc_purchase_checked x WHERE x.charge=p.id)
+        AND NOT EXISTS(SELECT 1 FROM fc_referral_commissions c WHERE c.charge=p.id) ORDER BY p.rowid""").fetchall():
+        data = json.loads(raw)
+        if not data.get("finder_referral_test"):
+            record_purchase(db, buyer, charge, plan, data, data.get("finder_referral_at", at),
+                            data.get("finder_referral_discount"))
+        db.execute("INSERT INTO fc_purchase_checked VALUES (?)", (charge,))
+    for (charge,) in db.execute("""SELECT c.charge FROM fc_referral_commissions c JOIN payments p ON p.id=c.charge
+        WHERE p.status='refunded' AND NOT EXISTS(SELECT 1 FROM fc_reversals r WHERE r.charge=c.charge)""").fetchall():
+        reverse(db, charge, admin_ids=admin_ids)
 
 
 def balances(db, partner=None):
@@ -242,7 +315,7 @@ def credit(db, event, ref, partner, at, value, reserved=0):
     journal(db, event, ref, partner, at, available=value-offset, reserved=reserved, debt=-offset)
 
 
-def reverse(db, charge, now=None):
+def reverse(db, charge, now=None, admin_ids=()):
     if not db.execute("SELECT 1 FROM sqlite_master WHERE name='fc_referral_commissions'").fetchone():
         return
     at = timestamp(now)
@@ -250,12 +323,19 @@ def reverse(db, charge, now=None):
     if not row or not db.execute("INSERT OR IGNORE INTO fc_reversals VALUES (?,?)", (charge, at)).rowcount:
         return
     partner, = row
-    payout = db.execute("SELECT id,amount FROM fc_payout_requests WHERE partner=? AND status IN ('requested','approved')",
-                        (partner,)).fetchone()
+    payout = db.execute("""SELECT p.id,p.amount,p.status,d.request,d.released,d.actor,d.released_by
+        FROM fc_payout_requests p LEFT JOIN fc_dispatch d ON d.request=p.id
+        WHERE p.partner=? AND p.status IN ('requested','approved','submitted')""", (partner,)).fetchone()
     if payout:
-        db.execute("UPDATE fc_payout_requests SET status='cancelled',reason='Возврат покупки' WHERE id=?", (payout[0],))
-        credit(db, "cancel", payout[0], partner, at, payout[1], reserved=-payout[1])
-        audit(db, None, payout[0], "cancelled", "Возврат покупки", at)
+        key, amount, state, prepared, released, actor, released_by = payout
+        if state == 'submitted':
+            audit(db, None, key, "refund_after_dispatch", "Получен возврат Stars", at)
+            for admin in (set(admin_ids) | {actor, released_by}) - {None}:
+                notify(db, admin, f"⚠️ Возврат Stars после подготовки заявки №{key}. Сверь операции кошелька.")
+        if state != 'submitted' or (prepared and released is None):
+            db.execute("UPDATE fc_payout_requests SET status='cancelled',reason='Возврат покупки' WHERE id=?", (key,))
+            credit(db, "cancel", key, partner, at, amount, reserved=-amount)
+            audit(db, None, key, "cancelled", "Возврат покупки", at)
     funded = db.execute("SELECT amount FROM fc_allocations WHERE charge=?", (charge,)).fetchone()
     if funded:
         debit = min(funded[0], balances(db, partner)[0])

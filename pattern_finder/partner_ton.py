@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import struct
+import threading
 from dataclasses import dataclass
 from itertools import islice
 
@@ -22,6 +23,7 @@ WALLET_CODES = {
 }
 PROVIDER = "https://tonapi.io"
 PROOF_TTL = 600
+_requests_in_flight = threading.BoundedSemaphore(4)
 
 
 def address(value):
@@ -62,6 +64,8 @@ def get(path):
     if os.getenv("TON_API_PROVIDER_URL", PROVIDER).rstrip("/") != PROVIDER:
         raise finance.Error("Неподдерживаемый провайдер TON Mainnet.")
     api_key = os.getenv("TON_API_PROVIDER_API_KEY")
+    if not _requests_in_flight.acquire(blocking=False):
+        raise finance.Error("TON временно перегружен. Повтори позднее.")
     try:
         response = requests.get(PROVIDER + "/v2/" + path, timeout=(3, 8), allow_redirects=False,
                                 headers={"Authorization": "Bearer " + api_key} if api_key else {})
@@ -74,6 +78,8 @@ def get(path):
         if isinstance(error, finance.Error):
             raise
         raise finance.Error("Данные TON временно недоступны.") from None
+    finally:
+        _requests_in_flight.release()
 
 
 def wallet_key(owner):

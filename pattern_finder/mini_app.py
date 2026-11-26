@@ -44,6 +44,8 @@ def authenticate(raw, token, now=None):
 
 
 PARTNER_ROUTES = {"state", "register", "challenge", "verify", "disconnect", "request"}
+PARTNER_LIMITS = {"state": (12, 120), "register": (4, 120), "challenge": (4, 120),
+                  "verify": (5, 120), "disconnect": (4, 120), "request": (4, 120)}
 TON_SDK = "https://unpkg.com/@tonconnect/ui@3.1.0/dist/tonconnect-ui.min.js"
 
 
@@ -70,7 +72,7 @@ def partner_action(buyer, action, data):
     if action == "disconnect":
         partner_payouts.disconnect(buyer)
         return {}
-    if not partners.enabled():
+    if action in ("challenge", "verify") and not partners.flag("REFERRALS_ENABLED"):
         raise partners.Error("Партнёрская программа пока недоступна.")
     if action == "challenge":
         manifest_config()
@@ -81,6 +83,25 @@ def partner_action(buyer, action, data):
         return {}
     key = partner_payouts.request(buyer, partners.amount(data.get("amount")), billing.admins())
     return {"request": key}
+
+
+def allow_partner_request(buyer, action):
+    limit, window = PARTNER_LIMITS[action]
+    now = partners.timestamp()
+    with storage.transaction() as db:
+        partners.schema(db)
+        db.execute("DELETE FROM fc_api_limits WHERE expires<=?", (now,))
+        scopes = [(f"user:{buyer}:{action}", limit, window)]
+        if action in ("state", "verify", "request"):
+            scopes.append(("ton_api", 80, 60))
+        for scope, maximum, _ in scopes:
+            hits = db.execute("SELECT hits FROM fc_api_limits WHERE scope=?", (scope,)).fetchone()
+            if hits and hits[0] >= maximum:
+                return False
+        for scope, _, seconds in scopes:
+            db.execute("INSERT INTO fc_api_limits VALUES (?,?,1) ON CONFLICT(scope) DO UPDATE SET hits=hits+1",
+                       (scope, now+seconds))
+        return True
 
 
 def state(buyer, payload=None):
@@ -194,6 +215,9 @@ def application(env, start):
         if not isinstance(data, dict):
             raise ValueError("Некорректный запрос.")
         if affiliate in PARTNER_ROUTES:
+            if not allow_partner_request(buyer, affiliate):
+                return response("429 Too Many Requests", {"error": "Слишком много запросов. Повтори через две минуты."},
+                                extra=(("Retry-After", "120"),))
             return response("200 OK", partner_action(buyer, affiliate, data))
         if path == "/api/state":
             payload = data.get("payload")

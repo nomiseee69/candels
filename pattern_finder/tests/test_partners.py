@@ -36,6 +36,8 @@ def settings(tmp_path, monkeypatch):
     monkeypatch.setenv("TON_PAYOUT_SOURCE_ADDRESS", OWNER)
     monkeypatch.setenv("TON_SETTLEMENT_SOURCE_ADDRESS", SOURCE)
     monkeypatch.setenv("ADMIN_IDS", "1")
+    monkeypatch.setattr(mini_star_audit.notifier, "api_post",
+                        lambda method, data: {"ok": True, "result": {"transactions": []}})
 
 
 def code(user=PARTNER):
@@ -130,7 +132,14 @@ def fund(monkeypatch, proceeds=100_000_001):
         payouts.settle_batch(1, topup.root, "fragment-ref", 500, 10**9, 0, ["first"], NOW)
     with storage.transaction() as db:
         db.execute("INSERT INTO fc_wallets VALUES (?,?,?,?,1,'TON_MAINNET')", (PARTNER, WALLET, NOW, NOW))
+    mini_star_audit.refresh(now=NOW)
     return payment
+
+
+def authorize(key):
+    payouts.dispatch(1, key, "Подготовка", NOW)
+    token = payouts.start_intent(1, key, "release", "", "Сверено", NOW)
+    return payouts.confirm_intent(1, token, NOW)
 
 
 def test_funded_rounding_reservation_concurrency_and_refund_debt(monkeypatch):
@@ -151,7 +160,7 @@ def test_funded_rounding_reservation_concurrency_and_refund_debt(monkeypatch):
         key, = [result for result in pool.map(attempt, range(2)) if result]
     assert balance() == (0, 10_000_000, 0, 0)
     payouts.decision(1, key, True, "Проверено", NOW)
-    payouts.dispatch(1, key, "Отправка владельцем", NOW)
+    authorize(key)
     with pytest.raises(f.Error):
         payouts.decision(1, key, False, "Попытка отмены", NOW)
     tx = ton.Transfer("3"*64, "4"*64, OWNER, WALLET, 10_000_000, NOW)
@@ -317,7 +326,7 @@ def test_ton_outage_does_not_spend_reserve(monkeypatch):
     payment = fund(monkeypatch)
     key = payouts.request(PARTNER, 10_000_000, now=NOW)
     payouts.decision(1, key, True, "Проверено", NOW)
-    payouts.dispatch(1, key, "Передано на отправку", NOW)
+    authorize(key)
     payouts.submit(1, key, "3"*64, NOW)
 
     def outage(*args):
@@ -331,6 +340,7 @@ def test_ton_outage_does_not_spend_reserve(monkeypatch):
     assert balance() == (0, 10_000_000, 0, 10_000_000)
     with storage.transaction() as db:
         assert db.execute("SELECT status FROM fc_payout_requests").fetchone() == ("submitted",)
+        assert db.execute("SELECT 1 FROM fc_notifications WHERE chat=1 AND text LIKE '%после подготовки%'").fetchone()
 
 
 def test_ledger_is_append_only(monkeypatch):
@@ -376,3 +386,204 @@ def test_notifications_retry_after_telegram_outage(monkeypatch):
     f.send_notifications(lambda method, data: {"ok": True})
     with storage.transaction() as db:
         assert db.execute("SELECT sent FROM fc_notifications").fetchone() == (NOW+3601,)
+
+
+def test_preparation_recovery_and_one_time_large_payment(monkeypatch):
+    fund(monkeypatch)
+    f.set_setting(1, "REFERRAL_LARGE_PAYOUT_USDT", "10", "двойная проверка")
+    key = payouts.request(PARTNER, f.UNIT*10, now=NOW)
+    payouts.decision(1, key, True, "Проверено", NOW)
+    payouts.dispatch(1, key, "Подготовка", NOW)
+    with pytest.raises(f.Error):
+        payouts.submit(1, key, "3"*64, NOW)
+    with pytest.raises(f.Error, match="Крупная"):
+        payouts.start_intent(1, key, "release", "9.99", "Сверено", NOW)
+    old = payouts.start_intent(1, key, "release", "10", "Готово", NOW)
+    reset = payouts.start_intent(1, key, "reset", "", "Ошибка подготовки", NOW)
+    with pytest.raises(f.Error):
+        payouts.confirm_intent(2, reset, NOW)
+    payouts.confirm_intent(1, reset, NOW)
+    assert balance() == (0, 10*f.UNIT, 0, 0)
+    payouts.dispatch(1, key, "Новая подготовка", NOW)
+    with pytest.raises(f.Error):
+        payouts.confirm_intent(1, old, NOW)
+    current = payouts.start_intent(1, key, "release", "10.000000", "Сверено", NOW)
+    assert "Перевод разрешён один раз" in payouts.confirm_intent(1, current, NOW)[1]
+    with pytest.raises(f.Error):
+        payouts.confirm_intent(1, current, NOW)
+    with pytest.raises(f.Error, match="Резерв останется"):
+        payouts.start_intent(1, key, "reset", "", "Индексатор ничего не нашёл", NOW)
+
+
+def test_wrong_txid_requires_confirmed_replacement_and_keeps_history(monkeypatch):
+    fund(monkeypatch)
+    key = payouts.request(PARTNER, f.UNIT*10, now=NOW)
+    payouts.decision(1, key, True, "Проверено", NOW)
+    authorize(key)
+    wrong, right = "3"*64, "4"*64
+    payouts.submit(1, key, wrong, NOW)
+    tx = ton.Transfer(right, "5"*64, OWNER, WALLET, 10*f.UNIT, NOW)
+
+    def lookup(txid, *args):
+        if txid == right:
+            return tx
+        raise f.Error("Индексатор не нашёл TXID")
+
+    monkeypatch.setattr(ton, "verify_transfer", lookup)
+    with pytest.raises(f.Error):
+        payouts.verify_payout(1, key, NOW)
+    next_wrong = payouts.start_intent(1, key, "replace", "7"*64, "Исправление", NOW)
+    with pytest.raises(f.Error):
+        payouts.confirm_intent(1, next_wrong, NOW)
+    assert balance() == (0, 10*f.UNIT, 0, 0)
+    correct = payouts.start_intent(1, key, "replace", right, "Перепроверен кошелёк", NOW)
+    payouts.confirm_intent(1, correct, NOW)
+    assert payouts.verify_payout(1, key, NOW) is None
+    with pytest.raises(f.Error):
+        payouts.start_intent(1, key, "replace", "6"*64, "Ошибка", NOW)
+    with pytest.raises(f.Error):
+        payouts.verify_payout(1, key, NOW)
+    with storage.transaction() as db:
+        assert db.execute("SELECT tx FROM fc_tx_history ORDER BY rowid").fetchall() == [(wrong,), (right,)]
+
+
+def test_stars_failure_stale_sync_and_refund_block_dispatch(monkeypatch):
+    fund(monkeypatch)
+    key = payouts.request(PARTNER, f.UNIT*10, now=NOW)
+    payouts.decision(1, key, True, "Проверено", NOW)
+    with pytest.raises(f.Error, match="сверка Stars"):
+        payouts.dispatch(1, key, "Старые данные", NOW+301)
+    payouts.dispatch(1, key, "Подготовка", NOW)
+    token = payouts.start_intent(1, key, "release", "", "Готово", NOW)
+    monkeypatch.setattr(mini_star_audit.notifier, "api_post", lambda *args: {"ok": False})
+    with pytest.raises(f.Error, match="приостановлены"):
+        payouts.confirm_intent(1, token, NOW)
+    refund = {"id": "first", "date": NOW, "amount": -500,
+              "receiver": {"type": "user", "transaction_type": "invoice_payment", "user": {"id": BUYER}}}
+    monkeypatch.setattr(mini_star_audit.notifier, "api_post",
+                        lambda *args: {"ok": True, "result": {"transactions": [refund]}})
+    with pytest.raises(f.Error):
+        payouts.confirm_intent(1, token, NOW)
+    assert balance() == (0, 0, 0, 0)
+    with storage.transaction() as db:
+        assert db.execute("SELECT status FROM fc_payout_requests WHERE id=?", (key,)).fetchone() == ("cancelled",)
+        assert db.execute("SELECT 1 FROM fc_notifications WHERE chat=1 AND text LIKE '%после подготовки%'").fetchone()
+
+
+def test_paginated_official_sync_and_pro_survives_referral_failure(monkeypatch):
+    invite()
+    with monkeypatch.context() as patch:
+        def fail(*args):
+            raise RuntimeError("partner module failed")
+        patch.setattr(f, "record_purchase", fail)
+        assert billing.stars_paid(BUYER, invoice(), NOW)
+    assert billing.status(BUYER, NOW)["pro"]
+    empty_rows = [{"id": str(i)} for i in range(100)]
+    payment = {"id": "first", "date": NOW, "amount": 500,
+               "source": {"type": "user", "transaction_type": "invoice_payment", "user": {"id": BUYER}}}
+    offsets = []
+
+    def api(method, params):
+        offsets.append(params["offset"])
+        return {"ok": True, "result": {"transactions": [payment] if params["offset"] else empty_rows}}
+
+    assert mini_star_audit.refresh(api, NOW) == 1
+    assert offsets == [0, 100, 0]
+    assert mini_star_audit.refresh(api, NOW) == 0
+    assert payouts.overview(PARTNER)["purchases"] == 1
+
+
+def test_cutover_and_withdrawal_pause_preserve_accrual(monkeypatch):
+    monkeypatch.setenv("REFERRAL_EARLY_REGISTRATION", "1")
+    monkeypatch.setenv("MINI_APP_AFFILIATE_ACTIVE", "1")
+    monkeypatch.delenv("REFERRAL_NATIVE_ENDED_AT")
+    link = code()
+    assert not f.attribute(BUYER, link, NOW)
+    monkeypatch.setenv("MINI_APP_AFFILIATE_ACTIVE", "0")
+    monkeypatch.setenv("REFERRAL_NATIVE_ENDED_AT", str(NOW-DAY))
+    assert f.attribute(BUYER, link, NOW)
+    monkeypatch.setenv("REFERRAL_PAYOUTS_ENABLED", "0")
+    monkeypatch.setenv("REFERRALS_ENABLED", "0")
+    assert billing.stars_paid(BUYER, invoice(), NOW)
+    assert payouts.overview(PARTNER, NOW)["counts"] == {"pending": 1}
+    assert payouts.overview(PARTNER, NOW)["unquoted"] == 1
+    with pytest.raises(f.Error, match="Вывод"):
+        payouts.request(PARTNER, 10*f.UNIT)
+    monkeypatch.setenv("REFERRALS_ENABLED", "1")
+    with pytest.raises(f.Error, match="Обеспечение"):
+        payouts.settle_batch(1, "1"*64, "fragment-ref", 500, 10**9, 0, ["first"], NOW)
+
+
+def test_native_commission_blocks_funding(monkeypatch):
+    invite(now=NOW-25*DAY)
+    assert billing.stars_paid(BUYER, invoice(), NOW-24*DAY)
+    event = {"id": "first", "date": NOW-24*DAY, "amount": 500,
+             "source": {"type": "user", "transaction_type": "invoice_payment", "user": {"id": BUYER},
+                        "affiliate": {"amount": 50, "commission_per_mille": 100}}}
+    fragment = {"id": "fragment-ref", "date": NOW-2*DAY, "amount": 500,
+                "receiver": {"type": "fragment", "withdrawal_state": {"type": "succeeded", "date": NOW-2*DAY}}}
+    mini_star_audit.reconcile([event, fragment])
+    transfer = ton.Transfer("1"*64, "2"*64, SOURCE, OWNER, 100*f.UNIT, NOW-1)
+    monkeypatch.setattr(ton, "verify_transfer", lambda *a, **kw: transfer)
+    monkeypatch.setattr(ton, "jetton_wallet", lambda owner: (owner, 100*f.UNIT))
+    with pytest.raises(f.Error, match="непроверенный"):
+        payouts.settle_batch(1, transfer.root, "fragment-ref", 500, 10**9, 0, ["first"], NOW)
+    assert balance() == (0, 0, 0, 0)
+
+
+def test_discounted_pro_survives_referral_retry(monkeypatch):
+    invite(now=NOW-60)
+    assert discounts.issue(1, BUYER, 50, None, NOW) == "issued"
+    quote = discounts.invoice(BUYER, "month", NOW)
+    payment = {**invoice(stars=250), "invoice_payload": quote["payload"], "id": "q", "from": {"id": BUYER}}
+    assert discounts.pre_checkout(payment, NOW) == "ok"
+    with monkeypatch.context() as patch:
+        def fail(*args):
+            raise RuntimeError("partner module failed")
+        patch.setattr(f, "record_purchase", fail)
+        assert discounts.settle(BUYER, payment, NOW)[0] == "paid"
+    assert billing.status(BUYER, NOW)["pro"]
+    mini_star_audit.refresh(now=NOW)
+    with storage.transaction() as db:
+        assert db.execute("SELECT stars,discount FROM fc_referral_commissions").fetchone() == (250, 50)
+
+
+def test_admin_buttons_and_bound_reply_require_private_admin(monkeypatch):
+    import bot
+
+    seen = []
+    monkeypatch.setattr(bot, "answer_callback", lambda *args: None)
+    monkeypatch.setattr(bot, "background", lambda run, *args: run(*args))
+    monkeypatch.setattr(bot, "show_view", lambda chat, message, view, *args: seen.append(view))
+    monkeypatch.setattr(bot, "send_message", lambda *args: 95)
+    monkeypatch.setattr(bot, "remember_username", lambda *args: None)
+    monkeypatch.setattr(bot, "partner_prompts", {})
+    monkeypatch.setattr(bot.partner_admin, "panel_reply", lambda *args: pytest.fail("admin reply accepted without rights"))
+
+    def callback(chat_id, sender, data):
+        bot.handle_callback({"id": "x", "from": {"id": sender}, "data": data,
+                             "message": {"message_id": 90, "chat": {"id": chat_id, "type": "private"}}})
+
+    callback(7, 7, "pa:home")
+    callback(1, 7, "pa:home")
+    assert not seen
+    callback(1, 1, "pa:home")
+    assert len(seen[0][1]["inline_keyboard"]) == 8
+    callback(1, 1, "pa:find")
+    assert bot.partner_prompts[1][0] == 95
+    monkeypatch.setenv("ADMIN_IDS", "8")
+    bot.handle_message({"text": "/not_a_command", "chat": {"id": 1, "type": "private"}, "from": {"id": 1},
+                        "reply_to_message": {"message_id": 95}})
+    assert 1 in bot.partner_prompts
+
+
+def test_signed_rate_limit_keeps_subscription_routes_open(monkeypatch):
+    import mini_app
+    from test_mini_app import invoke, signed
+
+    monkeypatch.setattr(mini_app.notifier, "TOKEN", "test-token")
+    assert invoke("/api/partners/register", {}, signed())[0] == "200 OK"
+    for _ in range(4):
+        assert invoke("/api/partners/challenge", {}, signed())[0] == "200 OK"
+    assert invoke("/api/partners/challenge", {}, signed())[0] == "429 Too Many Requests"
+    assert invoke("/api/state", {}, signed())[0] == "200 OK"
