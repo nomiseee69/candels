@@ -37,7 +37,7 @@ h2{font-size:19px}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 
 .affiliate-flow{margin-top:12px}
-.affiliate-action{display:block;text-align:center;border-radius:14px;padding:13px 12px;min-height:48px;background:var(--accent);color:var(--ink);text-decoration:none;font-weight:780}
+.affiliate-action{display:block;width:100%;text-align:center;border-radius:14px;padding:13px 12px;min-height:48px;background:var(--accent);color:var(--ink);text-decoration:none;font-weight:780}
 .affiliate-flow a:focus-visible,.affiliate-flow summary:focus-visible,.affiliate-flow input:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .affiliate-navigation{margin:10px 2px 0;color:var(--muted);font-size:14px}
 .affiliate-navigation a{color:var(--accent)}

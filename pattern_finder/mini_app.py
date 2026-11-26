@@ -41,6 +41,56 @@ def authenticate(raw, token, now=None):
     return user["id"]
 
 
+AFFILIATE_URL = "tg://settings/stars/earn"
+AFFILIATE_COOLDOWN = 60
+AFFILIATE_MESSAGE = (
+    "🤝 Партнёрская программа Finder Candles\n\n"
+    "Приглашай пользователей и получай 10% от подходящих покупок в течение одного месяца.\n\n"
+    "1. Нажми кнопку ниже.\n"
+    "2. Выбери «Дата запуска» и найди Finder Candles (@findercandles_bot).\n"
+    "3. Проверь условия и нажми «Присоединиться».\n"
+    "4. Выбери баланс для получения Stars.\n"
+    "5. Скопируй свою партнёрскую ссылку.\n\n"
+    "Персональную ссылку создаст Telegram после подключения."
+)
+
+
+def affiliate_enabled():
+    return os.getenv("MINI_APP_AFFILIATE_ACTIVE", "0") == "1"
+
+
+def send_affiliate_message(buyer):
+    if not affiliate_enabled():
+        return "403 Forbidden", {"error": "Партнёрская программа пока недоступна."}
+    # Claim a short cooldown before calling Telegram, including when delivery times out.
+    # Release the database lock before making the network request.
+    now = int(time.time())
+    with storage.transaction() as db:
+        db.execute("CREATE TABLE IF NOT EXISTS mini_affiliate_messages "
+                   "(buyer INTEGER PRIMARY KEY, next_attempt INTEGER NOT NULL)")
+        db.execute("CREATE INDEX IF NOT EXISTS mini_affiliate_messages_expiry "
+                   "ON mini_affiliate_messages(next_attempt)")
+        db.execute("DELETE FROM mini_affiliate_messages WHERE next_attempt<=?", (now,))
+        claimed = db.execute("INSERT OR IGNORE INTO mini_affiliate_messages VALUES (?,?)",
+                             (buyer, now + AFFILIATE_COOLDOWN))
+        if not claimed.rowcount:
+            until, = db.execute("SELECT next_attempt FROM mini_affiliate_messages WHERE buyer=?", (buyer,)).fetchone()
+            return "429 Too Many Requests", {
+                "error": "Проверь чат с ботом. Повторить отправку можно чуть позже.", "retry_after": until - now}
+
+    keyboard = {"inline_keyboard": [[{"text": "🚀 Открыть партнёрскую программу", "url": AFFILIATE_URL}]]}
+    reply = notifier.api_post("sendMessage", {
+        "chat_id": buyer, "text": AFFILIATE_MESSAGE, "reply_markup": json.dumps(keyboard, ensure_ascii=False)})
+    result = reply.get("result")
+    if reply.get("ok") is True and isinstance(result, dict) and type(result.get("message_id")) is int and result["message_id"] > 0:
+        return "200 OK", {"sent": True}
+    if reply.get("error_code") in (400, 403):
+        return "403 Forbidden", {"error": "Бот не может написать тебе. Открой чат, разблокируй бота при необходимости, "
+                                           "нажми «Старт» и повтори попытку."}
+    return "503 Service Unavailable", {"error": "Telegram пока не подтвердил отправку. Проверь чат с ботом "
+                                               "или повтори попытку через минуту."}
+
+
 def state(buyer, payload=None):
     status = billing.status(buyer, provision=False)
     offer = discounts.active(buyer)
@@ -57,7 +107,7 @@ def state(buyer, payload=None):
     return {"pro": status["pro"], "until": status["until"], "recurring": bool(status.get("recurring") and blocked),
             "cancelled": cancelled, "can_cancel": bool(charge and not cancelled), "purchase_blocked": blocked,
             "scans_left": None if status["pro"] else billing.scans_left(buyer),
-            "affiliate_active": os.getenv("MINI_APP_AFFILIATE_ACTIVE", "0") == "1",
+            "affiliate_active": affiliate_enabled(),
             "trial": bool(status["trial"] and status["pro"]), "discount": percent, "plans": plans, "paid": paid}
 
 
@@ -129,7 +179,7 @@ def application(env, start):
         return response("200 OK", (ROOT / filename).read_bytes(), mime)
     if method == "GET" and path == "/health":
         return response("200 OK", {"ok": True})
-    if method != "POST" or path not in ("/api/state", "/api/invoice", "/api/cancel"):
+    if method != "POST" or path not in ("/api/state", "/api/invoice", "/api/cancel", "/api/affiliate-message"):
         return response("404 Not Found", {"error": "Страница недоступна."})
     raw = env.get("HTTP_X_TELEGRAM_INIT_DATA", "")
     try:
@@ -143,6 +193,8 @@ def application(env, start):
         data = json.loads(env["wsgi.input"].read(length))
         if not isinstance(data, dict):
             raise ValueError("Некорректный запрос.")
+        if path == "/api/affiliate-message":
+            return response(*send_affiliate_message(buyer))
         if path == "/api/state":
             payload = data.get("payload")
             return response("200 OK", state(buyer, payload if isinstance(payload, str) else None))
