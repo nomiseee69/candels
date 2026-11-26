@@ -35,3 +35,17 @@ h2{font-size:19px}
 .instructions li+li{margin-top:8px}
 [hidden]{display:none!important}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
+
+.affiliate-flow{margin-top:12px}
+.affiliate-action{display:block;text-align:center;border-radius:14px;padding:13px 12px;min-height:48px;background:var(--accent);color:var(--ink);text-decoration:none;font-weight:780}
+.affiliate-flow a:focus-visible,.affiliate-flow summary:focus-visible,.affiliate-flow input:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.affiliate-navigation{margin:10px 2px 0;color:var(--muted);font-size:14px}
+.affiliate-navigation a{color:var(--accent)}
+.affiliate-identity{display:grid;justify-items:start;gap:6px;margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:12px}
+.affiliate-identity input{width:100%;border:0;padding:0;color:var(--muted);background:transparent;font:inherit}
+.affiliate-identity button{font-size:14px;text-align:left;max-width:100%}
+.affiliate-identity [role=status]{margin:0;font-size:13px}
+.affiliate-identity [role=status]:empty{display:none}
+.affiliate-flow h2+p,.affiliate-flow details{margin-top:8px}
+.affiliate-flow summary{cursor:pointer;color:var(--accent);font-weight:650;padding:8px 0}
+.affiliate-flow blockquote{margin:8px 0 0;padding-left:12px;border-left:2px solid var(--accent);color:var(--muted)}

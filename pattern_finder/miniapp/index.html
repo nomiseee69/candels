@@ -25,12 +25,39 @@
 <section id="partners" hidden>
 <div class="hero"><p class="eyebrow">TELEGRAM STARS</p><h1>💸 Партнёрская программа</h1>
 <p id="affiliate-terms">Партнёрская программа пока не открыта.</p></div>
-<div id="affiliate-guide" class="instructions" hidden><h2>Как получить ссылку</h2><ol>
-<li>В Telegram открой «Настройки» → «Мои звёзды» → «Заработать звёзды».</li>
-<li>Выбери Finder Candles, если программа доступна, и выбери баланс для комиссии.</li>
-<li>Скопируй официальную ссылку. Там же можно посмотреть статистику.</li>
-</ol><p>Stars зачисляет Telegram на выбранный баланс. Ставку и срок проверь перед подключением.</p>
-<button type="button" id="guide">Инструкция Telegram ↗</button></div>
+<div id="affiliate-guide" class="affiliate-flow" hidden>
+<a class="affiliate-action" id="affiliate-open" href="tg://settings/stars/earn" aria-describedby="affiliate-navigation">🚀 Получить партнёрскую ссылку</a>
+<p class="affiliate-navigation" id="affiliate-navigation" role="status" hidden>
+Если раздел не открылся, <a href="tg://settings/stars/earn">попробуй снова</a> или открой в приложении Telegram «Настройки» → «Мои звёзды» → «Заработать звёзды».
+</p>
+<div class="instructions">
+<h2>Как подключиться</h2>
+<div class="affiliate-identity">
+<strong>Finder Candles</strong>
+<input id="affiliate-username" aria-label="Имя бота в Telegram" value="@findercandles_bot" readonly>
+<button type="button" id="affiliate-copy">📋 Скопировать @findercandles_bot</button>
+<p id="affiliate-copy-status" role="status"></p>
+</div>
+<ol>
+<li>Открой «Заработать звёзды». Если доступна сортировка по дате запуска, выбери «Сначала новые».</li>
+<li>Найди Finder Candles. Сверь название и владельца в профиле приложения, затем нажми «Присоединиться».</li>
+<li>Выбери доступный баланс для комиссии и скопируй персональную ссылку, которую выдаст Telegram.</li>
+</ol>
+<details>
+<summary>Раздел не открылся?</summary>
+<p>Открой в приложении Telegram «Настройки» → «Мои звёзды» → «Заработать звёзды». Если пункта нет, обнови Telegram или попробуй другой клиент.</p>
+</details>
+</div>
+<div class="instructions">
+<h2>Получил партнёрскую ссылку?</h2>
+<p>Отправляй друзьям и публикуй персональную ссылку, которую создал Telegram. Обычная ссылка на бота не засчитывает приглашение. Статистика и доход доступны в Telegram в разделе «Мои программы».</p>
+<details>
+<summary>Как поделиться ссылкой</summary>
+<p>Скопируй свою ссылку из «Моих программ» и добавь её в конец сообщения.</p>
+<blockquote>Нашёл Finder Candles — бот автоматически ищет похожие криптовалютные паттерны по скриншотам графиков. Попробуй!</blockquote>
+</details>
+</div>
+</div>
 </section>
 </main>
 </body>

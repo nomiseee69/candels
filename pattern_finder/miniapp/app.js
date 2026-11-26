@@ -16,7 +16,24 @@ document.querySelectorAll("[data-panel]").forEach(button => button.addEventListe
   });
 }));
 element("close").addEventListener("click", () => telegram?.close());
-element("guide").addEventListener("click", () => telegram?.openLink("https://telegram.org/tour/affiliate-programs"));
+element("affiliate-open").addEventListener("click", () => {
+  // A WebView may leave the page, open a native screen, or ignore the scheme.
+  // The client does not report which happened, so keep help visible on return.
+  element("affiliate-navigation").hidden = false;
+});
+
+element("affiliate-copy").addEventListener("click", async () => {
+  const username = element("affiliate-username");
+  const status = element("affiliate-copy-status");
+  try {
+    await navigator.clipboard.writeText(username.value);
+    status.textContent = "Имя бота скопировано.";
+  } catch {
+    username.focus();
+    username.select();
+    status.textContent = "Не удалось скопировать автоматически. Имя выделено: выбери «Копировать».";
+  }
+});
 
 async function api(path, body = {}) {
   const response = await fetch("/api/" + path, {
