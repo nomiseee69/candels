@@ -16,10 +16,25 @@ document.querySelectorAll("[data-panel]").forEach(button => button.addEventListe
   });
 }));
 element("close").addEventListener("click", () => telegram?.close());
-element("affiliate-open").addEventListener("click", () => {
-  // A WebView may leave the page, open a native screen, or ignore the scheme.
-  // The client does not report which happened, so keep help visible on return.
-  element("affiliate-navigation").hidden = false;
+element("affiliate-open").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  if (button.disabled) return;
+  button.disabled = true;
+  const status = element("affiliate-navigation");
+  status.hidden = false;
+  status.textContent = "Отправляю кнопку в чат…";
+  try {
+    if (!telegram?.initData) throw new Error("Открой приложение заново из Telegram.");
+    const reply = await api("affiliate-message");
+    if (reply.sent !== true) throw new Error("Отправка не подтверждена. Проверь чат или повтори попытку.");
+  } catch (error) {
+    status.textContent = error.message === "Failed to fetch" ? "Нет связи с сервером. Повтори попытку." : error.message;
+    element("affiliate-steps").open = true;
+    button.disabled = false;
+    return;
+  }
+  status.textContent = "Кнопка отправлена в чат с ботом.";
+  setTimeout(() => telegram?.close?.(), 450);
 });
 
 element("affiliate-copy").addEventListener("click", async () => {
