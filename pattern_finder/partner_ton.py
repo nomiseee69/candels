@@ -26,6 +26,14 @@ PROOF_TTL = 600
 _requests_in_flight = threading.BoundedSemaphore(4)
 
 
+class NotFound(finance.Error):
+    pass
+
+
+class UnsupportedWallet(finance.Error):
+    pass
+
+
 def address(value):
     if not isinstance(value, str) or len(value) > 72:
         raise finance.Error("Некорректный TON-адрес.")
@@ -70,7 +78,7 @@ def get(path):
         response = requests.get(PROVIDER + "/v2/" + path, timeout=(3, 8), allow_redirects=False,
                                 headers={"Authorization": "Bearer " + api_key} if api_key else {})
         if response.status_code == 404:
-            raise finance.Error("TON ещё не подтвердил данные. Проверь адрес или повтори позднее.")
+            raise NotFound("TON ещё не подтвердил данные. Проверь адрес или повтори позднее.")
         if response.status_code != 200:
             raise ValueError
         return response.json()
@@ -93,7 +101,14 @@ def proof_digest(owner, domain, at, payload):
     return hashlib.sha256(b"\xff\xffton-connect" + hashlib.sha256(content).digest()).digest()
 
 
-def proof_owner(account, proof, domain, issued, now):
+def wallet_code_hash(code):
+    if code.type_ == 2 and len(code.bits) == 264 and not code.refs:
+        # A TON library reference stores its target's 256-bit code hash after the type byte.
+        return code.bits[8:].tobytes().hex()
+    return code.hash.hex()
+
+
+def proof_details(account, proof, domain, issued, now):
     try:
         if account.get("chain") != "-239" or not domain:
             raise ValueError
@@ -107,9 +122,10 @@ def proof_owner(account, proof, domain, issued, now):
         if state.hash.hex() != owner[2:]:
             raise ValueError
         parsed = StateInit.deserialize(state.begin_parse())
-        offset = WALLET_CODES.get(parsed.code.hash.hex())
+        code_hash = wallet_code_hash(parsed.code)
+        offset = WALLET_CODES.get(code_hash)
         if offset is None:
-            raise ValueError
+            raise UnsupportedWallet("Поддерживаются Wallet V4R2 и V5R1.")
         data = parsed.data.begin_parse()
         data.skip_bits(offset)
         key = data.load_bytes(32)
@@ -118,12 +134,22 @@ def proof_owner(account, proof, domain, issued, now):
             raise ValueError
         signature = base64.b64decode(proof["signature"], validate=True)
         VerifyKey(key).verify(proof_digest(owner, domain, stamp, proof["payload"]), signature)
-        # The proof does not sign a chain ID. Require the reviewed key on an active Mainnet wallet.
-        if wallet_key(owner) != key:
-            raise ValueError
-        return owner
+        return owner, key, code_hash
+    except UnsupportedWallet:
+        raise
     except Exception:
         raise finance.Error("Кошелёк TON Mainnet не подтверждён. Используй активный Wallet V4R2 или V5R1.") from None
+
+
+def proof_owner(account, proof, domain, issued, now):
+    try:
+        owner, key, _ = proof_details(account, proof, domain, issued, now)
+        # The proof does not sign a chain ID. Require the reviewed key on an active Mainnet wallet.
+        if wallet_key(owner) == key:
+            return owner
+    except Exception:
+        pass
+    raise finance.Error("Кошелёк TON Mainnet не подтверждён. Используй активный Wallet V4R2 или V5R1.")
 
 
 def jetton_wallet(owner):

@@ -125,7 +125,8 @@ if (telegram?.initData) {
 // Partner controls are loaded on demand, independently of Pro checkout.
 let partnerState;
 let walletUi;
-let challenge;
+let pendingProof;
+let openingWallet = false;
 const partnerText = text => { element("partner-message").textContent = text; };
 const labels = {pending:"ожидает сверки", matured_unfunded:"ожидает обеспечения",
   funded:"обеспечено", reversed:"отменено", requested:"на проверке", approved:"одобрено",
@@ -220,44 +221,55 @@ partnerClick("partner-copy", async () => {
   catch { field.focus(); field.select(); partnerText("Выделил ссылку. Выбери «Копировать»."); }
 });
 
-async function connectUi() {
+async function connectUi(config) {
   if (walletUi) return walletUi;
   await new Promise((resolve, reject) => {
     const script = document.createElement("script");
-    script.src = partnerState.sdk;
+    script.src = config.sdk;
     script.crossOrigin = "anonymous";
     script.integrity = "sha384-zGhKyT491TjdZycV4y1fa0Z1NUdta5MUDimkZ5n6+32EFHhkv74w3mzohlRK3X50";
     script.onload = resolve;
     script.onerror = () => { script.remove(); reject(new Error("TON Connect недоступен.")); };
     document.head.append(script);
   });
-  walletUi = new window.TON_CONNECT_UI.TonConnectUI({manifestUrl: partnerState.manifest});
+  walletUi = new window.TON_CONNECT_UI.TonConnectUI({manifestUrl: config.manifest});
   walletUi.onStatusChange(async wallet => {
-    if (!wallet || !challenge) return;
+    if (!wallet || !pendingProof) return;
+    const attempt = pendingProof;
+    pendingProof = undefined;
     const proof = wallet.connectItems?.tonProof?.proof;
-    if (!proof || proof.payload !== challenge) {
-      challenge = undefined;
-      partnerText("Кошелёк не предоставил актуальное подтверждение TON. Попробуй подключить совместимый кошелёк.");
+    if (!proof || proof.payload !== attempt.payload) {
+      attempt.error("Кошелёк не предоставил актуальное подтверждение TON. Подключи его заново.");
       return;
     }
-    challenge = undefined;
     try {
-      await api("partners/verify", {account: wallet.account, proof});
-      await loadPartners();
-      partnerText("Кошелёк подтверждён.");
-    } catch (error) { partnerText(error.message); }
+      const result = await api(attempt.verify, {...attempt.body, account: wallet.account, proof});
+      await attempt.success(result);
+    } catch (error) { attempt.error(error.message); }
   });
   await walletUi.connectionRestored;
   return walletUi;
 }
-partnerClick("partner-connect", async () => {
-  const ui = await connectUi();
-  if (ui.connected) await ui.disconnect();
-  const result = await api("partners/challenge");
-  challenge = result.payload;
-  ui.setConnectRequestParameters({state: "ready", value: {tonProof: challenge}});
-  await ui.openModal();
-});
+async function requestWalletProof(config, attempt) {
+  if (openingWallet) throw new Error("Подожди открытия кошелька.");
+  openingWallet = true;
+  pendingProof = undefined;
+  try {
+    const ui = await connectUi(config);
+    if (ui.connected) await ui.disconnect();
+    const result = await api(attempt.challenge, attempt.body);
+    if (attempt.showReport) attempt.showReport(result.report);
+    pendingProof = {...attempt, payload: result.payload};
+    ui.setConnectRequestParameters({state: "ready", value: {tonProof: result.payload}});
+    await ui.openModal();
+  } finally {
+    openingWallet = false;
+  }
+}
+partnerClick("partner-connect", async () => requestWalletProof(partnerState, {
+  challenge: "partners/challenge", verify: "partners/verify", error: partnerText,
+  success: async () => { await loadPartners(); partnerText("Кошелёк подтверждён."); }
+}));
 partnerClick("partner-disconnect", async () => {
   await api("partners/disconnect");
   if (walletUi?.connected) await walletUi.disconnect();
@@ -277,3 +289,64 @@ partnerClick("partner-form", async form => {
   await loadPartners();
   partnerText(`Заявка №${result.request} принята.`);
 }, "submit");
+
+const ownerSlots = ["income", "partner"];
+let ownerWalletConfig;
+const ownerStatuses = {confirmed: "Подтверждён", failed: "Требуется проверка", pending: "Требуется проверка",
+  unsupported: "Не поддерживается", found: "Подтверждён", not_found: "Не найден или ещё не проиндексирован",
+  unavailable: "Временно недоступен", active: "Активен", uninit: "Не развёрнут", frozen: "Заморожен",
+  nonexist: "Аккаунт отсутствует"};
+
+function showOwnerReport(slot, report) {
+  const rows = ["Адрес и контрольная сумма — подтверждены", "Workchain — 0"];
+  if (report) {
+    rows.push(
+      `Аккаунт в Mainnet — ${ownerStatuses[report.account]}`,
+      `Версия — ${report.version || "Требуется проверка"}` + (report.supported === false ? " · Не поддерживается" : ""),
+      `TON Connect в Mainnet — ${ownerStatuses[report.mainnet]}` + (report.network === false ? " · Выбрана другая сеть" : ""),
+      `Подпись владельца — ${ownerStatuses[report.signature]}`,
+      `Совпадение адреса — ${report.match === null ? "Требуется проверка" : report.match ? "Подтверждено" : "Адрес не совпадает"}`,
+      `Публичный ключ в TonAPI — ${ownerStatuses[report.key]}`,
+      `Официальный USDT Jetton — ${ownerStatuses[report.jetton]}`,
+      `Баланс — ${report.ton ?? "—"} TON · ${report.usdt ?? "—"} USDT`,
+      `Данные на ${new Date(report.checked_at * 1000).toLocaleString("ru-RU")}`
+    );
+    if (report.signature === "confirmed" && report.mainnet !== "confirmed") {
+      rows.push("Подпись совпала с адресом. Активный контракт и ключ в Mainnet пока не подтверждены.");
+    }
+  }
+  list(`owner-${slot}-report`, rows);
+}
+
+async function loadOwnerWallets() {
+  try {
+    const config = await api("owner-wallets/state");
+    if (!config.cards) return;
+    ownerWalletConfig = config;
+    for (const slot of ownerSlots) {
+      const card = config.cards[slot];
+      element(`owner-${slot}-address`).textContent = card.checksum ? card.address : "Проверь адрес в настройках.";
+      element(`owner-${slot}-check`).disabled = !card.checksum;
+      if (card.checksum) showOwnerReport(slot, card.report);
+    }
+    element("owner-wallet-tab").hidden = false;
+  } catch { /* The owner section stays hidden unless the backend grants access. */ }
+}
+
+for (const slot of ownerSlots) {
+  element(`owner-${slot}-check`).addEventListener("click", async event => {
+    const button = event.currentTarget;
+    const status = text => { element(`owner-${slot}-message`).textContent = text; };
+    button.disabled = true;
+    status("Получаем сведения о кошельке…");
+    try {
+      await requestWalletProof(ownerWalletConfig, {
+        challenge: "owner-wallets/challenge", verify: "owner-wallets/verify", body: {slot}, error: status,
+        showReport: report => { showOwnerReport(slot, report); status("Выбери этот адрес в приложении кошелька."); },
+        success: ({report}) => { showOwnerReport(slot, report); status(""); }
+      });
+    } catch (error) { status(error.message); }
+    finally {button.disabled = false;}
+  });
+}
+if (telegram?.initData) loadOwnerWallets();

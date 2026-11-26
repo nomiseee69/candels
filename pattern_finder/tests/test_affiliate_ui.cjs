@@ -6,7 +6,7 @@ const vm = require("node:vm");
 
 const script = readFileSync(join(__dirname, "../miniapp/app.js"), "utf8");
 
-function fixture(overrides = {}) {
+function fixture(overrides = {}, owner = null) {
   const nodes = new Map();
   const requests = [];
   let active = false;
@@ -24,11 +24,19 @@ function fixture(overrides = {}) {
     return nodes.get(id);
   }
   const context = vm.createContext({
-    window: {Telegram: {WebApp: {initData: "signed", ready() {}, expand() {}, onEvent() {}}}},
+    window: {Telegram: {WebApp: {initData: "signed", ready() {}, expand() {}, onEvent() {}}},
+             TON_CONNECT_UI: {TonConnectUI: class {
+      onStatusChange(callback) {this.callback = callback;}
+      setConnectRequestParameters(parameters) {this.payload = parameters.value.tonProof;}
+      async openModal() {await this.callback({account: {chain: "-239"}, connectItems: {tonProof: {proof: {payload: this.payload}}}});}
+    }}},
     document: {documentElement: {dataset: {}}, getElementById: element, querySelectorAll: () => [],
-               createElement: () => ({})},
+               createElement: () => ({}), head: {append(script) {script.onload();}}},
     fetch: async (path, options) => {
       requests.push([path, options]);
+      if (path === "/api/owner-wallets/state") return {ok: Boolean(owner), json: async () => owner || {error:"Недоступно"}};
+      if (path === "/api/owner-wallets/challenge") return {ok: true, json: async () => ({payload:"nonce", report:owner.report})};
+      if (path === "/api/owner-wallets/verify") return {ok: true, json: async () => ({report:{...owner.report, signature:"confirmed"}})};
       if (path === "/api/partners/register") active = true;
       return {ok: true, json: async () => ({
         enabled: true, commission: 10, registered: active, link: "https://t.me/findercandles_bot?start=fc_example",
@@ -40,7 +48,8 @@ function fixture(overrides = {}) {
     }
   });
   vm.runInContext(script, context);
-  return {element, requests, load: () => vm.runInContext("loadPartners()", context)};
+  return {element, requests, load: () => vm.runInContext("loadPartners()", context),
+          loadOwner: () => vm.runInContext("loadOwnerWallets()", context)};
 }
 
 test("partner sees real backend data and registration submits only signed auth", async () => {
@@ -80,4 +89,19 @@ test("small shortfall stays visible near the minimum", async () => {
   assert.equal(ui.element("partner-available").textContent, "9,99");
   assert.match(ui.element("partner-threshold").textContent, /0,01 USDT/);
   assert.equal(ui.element("partner-form").hidden, true);
+});
+
+test("owner buttons use diagnostic proof routes and stay hidden without backend access", async () => {
+  const ordinary = fixture();
+  await ordinary.loadOwner();
+  assert.equal(ordinary.element("owner-wallet-tab").hidden, true);
+  const ui = fixture({}, {sdk:"sdk", manifest:"manifest", report:{account:"not_found", mainnet:"pending",
+    signature:"pending", jetton:"not_found", key:"not_found", checked_at:1800000000, match:null},
+    cards:{income:{checksum:true,address:"income"},partner:{checksum:true,address:"partner"}}});
+  await ui.loadOwner();
+  assert.equal(ui.element("owner-wallet-tab").hidden, false);
+  for (const slot of ["income", "partner"]) await ui.element(`owner-${slot}-check`).click();
+  const verify = ui.requests.filter(([path]) => path === "/api/owner-wallets/verify");
+  assert.deepEqual(verify.map(([, request]) => JSON.parse(request.body).slot), ["income", "partner"]);
+  assert.ok(!ui.requests.some(([path]) => path.startsWith("/api/partners/")));
 });

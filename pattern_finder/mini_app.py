@@ -13,6 +13,7 @@ from wsgiref.simple_server import WSGIServer, WSGIRequestHandler, make_server
 import billing
 import discounts
 import mini_orders
+import owner_ton_diagnostics as owner_wallets
 import partner_finance as partners
 import partner_payouts
 import notifier
@@ -200,20 +201,31 @@ def application(env, start):
             return response("503 Service Unavailable", {"error": "TON Connect недоступен."})
         return response("200 OK", manifest, extra=(("Access-Control-Allow-Origin", "*"),))
     affiliate = path.removeprefix("/api/partners/") if path.startswith("/api/partners/") else None
-    if method != "POST" or (path not in ("/api/state", "/api/invoice", "/api/cancel") and affiliate not in PARTNER_ROUTES):
+    owner_route = path.removeprefix("/api/owner-wallets/") if path.startswith("/api/owner-wallets/") else None
+    owner_route = owner_route if owner_route in ("state", "challenge", "verify") else None
+    if method != "POST" or (path not in ("/api/state", "/api/invoice", "/api/cancel")
+                            and affiliate not in PARTNER_ROUTES and not owner_route):
         return response("404 Not Found", {"error": "Страница недоступна."})
     raw = env.get("HTTP_X_TELEGRAM_INIT_DATA", "")
     try:
         buyer = authenticate(raw, notifier.TOKEN)
     except (ValueError, TypeError):
         return response("401 Unauthorized", {"error": "Открой приложение заново из Telegram."})
+    if owner_route and not owner_wallets.allowed(buyer):
+        return response("404 Not Found", {"error": "Страница недоступна."})
     try:
         length = int(env.get("CONTENT_LENGTH") or "0")
-        if not 0 < length <= (24000 if affiliate == "verify" else 2048):
+        if not 0 < length <= (24000 if "verify" in (affiliate, owner_route) else 2048):
             raise ValueError("Некорректный запрос.")
         data = json.loads(env["wsgi.input"].read(length))
         if not isinstance(data, dict):
             raise ValueError("Некорректный запрос.")
+        if owner_route:
+            domain, manifest, _ = manifest_config()
+            result = owner_wallets.action(buyer, owner_route, data, domain)
+            if owner_route == "state":
+                result.update(manifest=manifest, sdk=TON_SDK)
+            return response("200 OK", result)
         if affiliate in PARTNER_ROUTES:
             if not allow_partner_request(buyer, affiliate):
                 return response("429 Too Many Requests", {"error": "Слишком много запросов. Повтори через две минуты."},
@@ -226,6 +238,8 @@ def application(env, start):
             cancel_renewal(buyer)
             return response("200 OK", state(buyer))
         return response("200 OK", invoice(buyer, data.get("plan"), data.get("discounted")))
+    except owner_wallets.RateLimited as error:
+        return response("429 Too Many Requests", {"error": str(error)}, extra=(("Retry-After", "120"),))
     except partners.Error as error:
         return response("400 Bad Request", {"error": str(error)})
     except ValueError as error:

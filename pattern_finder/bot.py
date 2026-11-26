@@ -50,6 +50,7 @@ import billing
 import discounts
 import mini_orders
 import mini_star_audit
+import owner_ton_diagnostics
 import partner_admin
 import partner_finance
 import subscription_guard
@@ -511,6 +512,8 @@ def admin_view(chat_id):
             [{"text": "🎁 Скидки", "callback_data": "adm:d:home"}], [TO_MENU]]
     if partner_finance.enabled() or partner_finance.cutover():
         rows.insert(-1, [{"text": "🤝 Партнёрская программа", "callback_data": "partneradmin"}])
+    if owner_ton_diagnostics.allowed(chat_id) and (url := mini_orders.app_url()):
+        rows.insert(-1, [{"text": "Проверить TON-кошельки", "web_app": {"url": url}}])
     return billing.stats() + wallet + "\n\n" + ADMIN_HELP, {"inline_keyboard": rows}
 
 

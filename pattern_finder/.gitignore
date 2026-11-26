@@ -4,6 +4,8 @@ users.json
 users.json.migrated
 users.db
 users.db-*
+owner_ton_diagnostics.db
+owner_ton_diagnostics.db-*
 backups/
 patterns/
 models/

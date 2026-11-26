@@ -11,7 +11,7 @@
 <body>
 <main>
 <header><span class="mark" aria-hidden="true">↗</span><strong>Finder Candles</strong><button type="button" id="close">В чат</button></header>
-<nav aria-label="Разделы"><button type="button" data-panel="pro" aria-pressed="true">Подписка</button><button type="button" data-panel="partners" aria-pressed="false">Партнёрам</button></nav>
+<nav aria-label="Разделы"><button type="button" data-panel="pro" aria-pressed="true">Подписка</button><button type="button" data-panel="partners" aria-pressed="false">Партнёрам</button><button type="button" id="owner-wallet-tab" data-panel="owner-wallets" aria-pressed="false" hidden>Кошельки</button></nav>
 <section id="pro">
 <div class="hero"><div class="chart" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
 <p class="eyebrow">FINDER CANDLES PRO</p><h1>Поиск без лимитов</h1>
@@ -64,6 +64,15 @@
 <p>Начисление ожидает минимум 21 день и становится доступным после подтверждения обеспечения. Выплаты USDT на TON Mainnet обрабатываются еженедельно по умолчанию. Возврат отменяет начисление. Уже выплаченная комиссия удерживается из следующих начислений.</p>
 <p>Участие бесплатное. Учитывается первый действительный пригласивший. Самоприглашения, тестовые оплаты и продления исключены. Сетевую комиссию оплачивает Finder Candles. Партнёр отвечает за свои налоговые обязательства.</p></details>
 <p id="partner-message" role="status" aria-live="polite"></p>
+</section>
+<section id="owner-wallets" hidden>
+<div class="hero"><h1>Проверка кошельков</h1><p>Проверка подписи не подтверждает возможность отправки USDT. Для проверки отправки потребовался бы отдельный перевод.</p></div>
+<div class="instructions"><h2>Finder Income</h2><p id="owner-income-address" class="wallet-address"></p>
+<button id="owner-income-check" type="button">Проверить кошелёк</button>
+<ul id="owner-income-report"></ul><p id="owner-income-message" role="status"></p></div>
+<div class="instructions"><h2>Finder Partner</h2><p id="owner-partner-address" class="wallet-address"></p>
+<button id="owner-partner-check" type="button">Проверить кошелёк</button>
+<ul id="owner-partner-report"></ul><p id="owner-partner-message" role="status"></p></div>
 </section>
 </main>
 </body>
