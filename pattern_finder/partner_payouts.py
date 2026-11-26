@@ -257,8 +257,6 @@ def confirm_intent(actor, token, now=None):
         except f.Error:
             pass
         else:
-            if _accounted(db, replacement.root, replacement.receipt):
-                raise f.Error("Фактический перевод уже учтён.")
             raise f.Error("Текущий TXID уже подтверждается. Проверь его и сверь перевод вручную.")
     check_time = f.timestamp(now)
     with storage.transaction() as db:
@@ -276,6 +274,8 @@ def confirm_intent(actor, token, now=None):
             f.audit(db, actor, key, "reset_preparation", reason, check_time)
             result = "Подготовка отменена до разрешения перевода. Резерв сохранён."
         else:
+            if _accounted(db, replacement.root, replacement.receipt):
+                raise f.Error("Фактический перевод уже учтён.")
             db.execute("INSERT OR IGNORE INTO fc_tx_history VALUES (?,?,NULL,?,'Историческая запись')",
                        (expected, key, check_time))
             _record_tx(db, actor, key, value, reason, check_time)

@@ -447,6 +447,57 @@ def test_wrong_txid_requires_confirmed_replacement_and_keeps_history(monkeypatch
         assert db.execute("SELECT tx FROM fc_tx_history ORDER BY rowid").fetchall() == [(wrong,), (right,)]
 
 
+def test_replacement_refused_when_current_txid_is_valid(monkeypatch):
+    fund(monkeypatch)
+    key = payouts.request(PARTNER, 10*f.UNIT, now=NOW)
+    payouts.decision(1, key, True, "Проверено", NOW)
+    authorize(key)
+    old, new = "3"*64, "4"*64
+    payouts.submit(1, key, old, NOW)
+    token = payouts.start_intent(1, key, "replace", new, "Проверка другого TXID", NOW)
+
+    def lookup(txid, source, destination, amount, since):
+        assert (source, destination, amount, since) == (OWNER, WALLET, 10*f.UNIT, NOW)
+        return ton.Transfer(txid, "5"*64, source, destination, amount, NOW)
+
+    monkeypatch.setattr(ton, "verify_transfer", lookup)
+    with pytest.raises(f.Error, match="Текущий TXID уже подтверждается"):
+        payouts.confirm_intent(1, token, NOW)
+    with storage.transaction() as db:
+        assert db.execute("SELECT status,tx FROM fc_payout_requests WHERE id=?", (key,)).fetchone() == ("submitted", old)
+        assert db.execute("SELECT tx FROM fc_tx_history WHERE request=?", (key,)).fetchall() == [(old,)]
+    assert balance() == (0, 10*f.UNIT, 0, 0)
+
+
+@pytest.mark.parametrize("used_hash", ["root", "receipt"])
+def test_replacement_rechecks_canonical_ids_after_ton_lookup(monkeypatch, used_hash):
+    fund(monkeypatch)
+    key = payouts.request(PARTNER, 10*f.UNIT, now=NOW)
+    payouts.decision(1, key, True, "Проверено", NOW)
+    authorize(key)
+    old, new = "3"*64, "4"*64
+    payouts.submit(1, key, old, NOW)
+    token = payouts.start_intent(1, key, "replace", new, "Сверка TXID", NOW)
+    transfer = ton.Transfer("5"*64, "6"*64, OWNER, WALLET, 10*f.UNIT, NOW)
+
+    def lookup(txid, *args):
+        if txid == new:
+            return transfer
+        # Another operation accounts for one of the canonical hashes during the network check.
+        with storage.transaction() as db:
+            db.execute("INSERT INTO fc_treasury_ledger VALUES (?,?,?,?,?,?)",
+                       (getattr(transfer, used_hash), "7"*64, 1, NOW, SOURCE, OWNER))
+        raise f.Error("Текущий TXID пока не найден")
+
+    monkeypatch.setattr(ton, "verify_transfer", lookup)
+    with pytest.raises(f.Error, match="Фактический перевод уже учтён"):
+        payouts.confirm_intent(1, token, NOW)
+    with storage.transaction() as db:
+        assert db.execute("SELECT status,tx FROM fc_payout_requests WHERE id=?", (key,)).fetchone() == ("submitted", old)
+        assert db.execute("SELECT tx FROM fc_tx_history WHERE request=?", (key,)).fetchall() == [(old,)]
+    assert balance() == (0, 10*f.UNIT, 0, 0)
+
+
 def test_stars_failure_stale_sync_and_refund_block_dispatch(monkeypatch):
     fund(monkeypatch)
     key = payouts.request(PARTNER, f.UNIT*10, now=NOW)
